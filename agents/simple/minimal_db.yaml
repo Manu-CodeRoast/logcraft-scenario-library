@@ -1,0 +1,20 @@
+# Minimal database agent — basic query logging.
+agent:
+  name: simple-db
+  type: database
+  rate: 100/s
+  error_rate: 0.005
+  message_template: "{query_type} {table} ({row_count} rows)"
+  fields:
+    - name: query_type
+      generator: weighted_choice
+      values: [SELECT, INSERT, UPDATE, DELETE]
+      weights: [60, 20, 15, 5]
+    - name: table
+      generator: choice
+      values: [users, orders, products, sessions]
+    - name: row_count
+      generator: range
+      min: 0
+      max: 500
+      integer: true

@@ -1,0 +1,46 @@
+scenario:
+  name: "web-server-simulation"
+  seed: 42
+  duration: 5m
+  includes: [includes/web_server_agents.yaml]
+
+  environment:
+    region: eu-west-1
+    cluster: prod-cluster-a
+    version: v2.1.0
+
+  noise:
+    log_duplication_rate: 0.005
+    missing_fields_rate: 0.002
+    random_delay_ms: [0, 10]
+
+  log_format:
+    type: json
+    fields:
+      - timestamp
+      - level
+      - service
+      - trace_id
+      - message
+      - latency_ms
+    field_variation:
+      latency_ms:
+        jitter: 0.05
+
+  outputs:
+    - name: output
+      type: file
+      format: json
+      path: output_logs\structured.json
+      max_size_bytes: 52428800
+      max_files: 3
+
+  incidents:
+    - name: "sporadic-cache-glitch"
+      trigger_probability: 0.02
+      duration: 20s
+      effects:
+        - target: "nginx-proxy"
+          error_rate: 0.15
+
+  agents: []

@@ -1,0 +1,195 @@
+# Real-life: Kafka-based log pipeline feeding Elasticsearch.
+# Simulates a production ingest pipeline with producers, broker, consumers, and ES.
+# Feeds ECS-formatted logs suitable for direct Elastic ingest.
+scenario:
+  name: kafka-elastic-pipeline
+  seed: 2026
+  duration: 15m
+
+  environment:
+    region: eu-west-1
+    cluster: prod-logging
+    version: v3.5.0
+
+  noise:
+    log_duplication_rate: 0.003
+    missing_fields_rate: 0.001
+    random_delay_ms: [0, 5]
+
+  templates:
+    go_service:
+      rate: 100/s
+      error_rate: 0.005
+      latency_ms:
+        distribution: normal
+        mean: 10
+        stddev: 4
+
+  # ── Outputs: dual ECS for Elastic + JSON console ──────────────────────
+  outputs:
+    - name: elastic_ingest
+      type: file
+      format: ecs
+      path: logs/elastic-ingest.ndjson
+      max_size_bytes: 52428800
+      max_files: 5
+    - name: console
+      type: console
+      format: json
+
+  incidents:
+    - name: kafka_partition_rebalance
+      trigger: "time > 5m"
+      duration: 2m
+      effects:
+        - target: kafka-broker
+          latency_multiplier: 10
+          error_rate: 0.05
+        - target: log-shipper
+          latency_multiplier: 3
+          error_rate: 0.08
+
+    - name: es_index_pressure
+      trigger: "time > 10m"
+      duration: 3m
+      effects:
+        - target: es-indexer
+          latency_multiplier: 5
+          error_rate: 0.12
+
+  interactions:
+    - from: log-shipper
+      to: kafka-broker
+      type: request
+    - from: kafka-broker
+      to: log-consumer
+      type: dependency
+    - from: log-consumer
+      to: es-indexer
+      type: request
+
+  rules:
+    - when: "kafka-broker.error_rate > 0.03"
+      propagate:
+        to: log-consumer
+        latency_multiplier: 4.0
+        error_rate: 0.10
+    - when: "es-indexer.error_rate > 0.05"
+      propagate:
+        to: log-consumer
+        latency_multiplier: 2.0
+
+  agents:
+    # ── Log shipper (Filebeat/Fluentd style) ────────────────────────────
+    - name: log-shipper
+      type: api_service
+      use: go_service
+      rate: 200/s
+      instances: 3
+      outputs: [elastic_ingest, console]
+      fields:
+        - name: source_file
+          generator: choice
+          values: [/var/log/app/api.log, /var/log/app/worker.log, /var/log/nginx/access.log]
+        - name: batch_size
+          generator: range
+          min: 50
+          max: 500
+          integer: true
+        - name: compression
+          generator: weighted_choice
+          values: [gzip, snappy, none]
+          weights: [50, 40, 10]
+      message_template: "Ship {batch_size} events from {source_file} ({compression})"
+
+    # ── Kafka broker ────────────────────────────────────────────────────
+    - name: kafka-broker
+      type: message_queue
+      rate: 800/s
+      error_rate: 0.002
+      contention:
+        max_connections: 500
+        queue_latency_ms: [0, 15]
+      latency_ms:
+        distribution: percentile
+        p50: 1
+        p95: 5
+        p99: 15
+      outputs: [console]
+      fields:
+        - name: topic
+          generator: weighted_choice
+          values: [logs-raw, logs-enriched, logs-dead-letter]
+          weights: [60, 30, 10]
+        - name: partition
+          generator: range
+          min: 0
+          max: 23
+          integer: true
+        - name: offset
+          generator: sequence
+          start: 5000000
+      message_template: "Produce {topic}[{partition}] offset={offset}"
+
+    # ── Log consumer (Logstash/Vector style) ────────────────────────────
+    - name: log-consumer
+      type: api_service
+      use: go_service
+      rate: 150/s
+      instances: 2
+      state:
+        lag:
+          initial: 0
+          max: 100000
+          growth_per_request: 0.3
+      effects:
+        - when: "lag > 50000"
+          latency_multiplier: 2
+        - when: "lag > 80000"
+          error_rate: 0.05
+      outputs: [console]
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: [parse, enrich, transform, route]
+          weights: [30, 30, 20, 20]
+        - name: records_processed
+          generator: range
+          min: 100
+          max: 5000
+          integer: true
+      message_template: "{operation}: {records_processed} records"
+
+    # ── Elasticsearch indexer ───────────────────────────────────────────
+    - name: es-indexer
+      type: search_engine
+      rate: 200/s
+      error_rate: 0.005
+      contention:
+        max_connections: 300
+        queue_latency_ms: [1, 30]
+      latency_ms:
+        distribution: percentile
+        p50: 10
+        p95: 80
+        p99: 500
+      outputs: [elastic_ingest, console]
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: [bulk_index, create, refresh]
+          weights: [70, 20, 10]
+        - name: index
+          generator: weighted_choice
+          values: [logs-2026.03.30, logs-2026.03.29, metrics-2026.03.30]
+          weights: [50, 30, 20]
+        - name: docs_indexed
+          generator: range
+          min: 100
+          max: 10000
+          integer: true
+        - name: status
+          generator: weighted_choice
+          values: ["200", "201", "429", "500", "503"]
+          weights: [65, 15, 10, 5, 5]
+      message_template: "{operation} /{index}: {docs_indexed} docs -> {status}"

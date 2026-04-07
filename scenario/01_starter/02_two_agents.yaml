@@ -1,0 +1,56 @@
+# Starter 02 — Two Agents
+# Adds a second agent and an interaction between them.
+# Concepts: multiple agents, error_rate, interactions, range generator
+scenario:
+  name: two-agents
+  seed: 42
+  duration: 2m
+
+  outputs:
+    - name: log-aggregator
+      type: http
+      url: http://ingest.logcraft.demo/v1/logs
+      format: json
+
+  agents:
+    - name: web-server
+      type: web_server
+      rate: 3/s
+      error_rate: 0.03
+      message_template: "{method} {path} -> {status_code}"
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT, DELETE]
+          weights: [60, 25, 10, 5]
+        - name: path
+          generator: choice
+          values: [/api/users, /api/orders, /api/products, /health]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "404", "500"]
+          weights: [80, 10, 7, 3]
+
+    - name: database
+      type: database
+      rate: 5/s
+      error_rate: 0.01
+      message_template: "{query} on {table} -> {row_count} rows"
+      fields:
+        - name: query
+          generator: weighted_choice
+          values: [SELECT, INSERT, UPDATE, DELETE]
+          weights: [55, 20, 15, 10]
+        - name: table
+          generator: choice
+          values: [users, orders, products]
+        - name: row_count
+          generator: range
+          min: 0
+          max: 200
+          integer: true
+
+  interactions:
+    - from: web-server
+      to: database
+      type: dependency

@@ -1,0 +1,233 @@
+# Demo: Full feature showcase — uses every major LogCraft feature.
+# Great for presentations and demonstrations.
+scenario:
+  name: feature-showcase
+  seed: 42
+  duration: 5m
+
+  environment:
+    region: us-east-1
+    cluster: demo-cluster
+    version: v1.0.0
+
+  noise:
+    log_duplication_rate: 0.005
+    missing_fields_rate: 0.003
+    random_delay_ms: [0, 15]
+
+  users:
+    count: 5000
+    sessions:
+      duration: [30s, 5m]
+      requests_per_session: [3, 50]
+
+  personas:
+    - name: power_user
+      weight: 2.0
+      behavior:
+        request_rate: high
+        endpoints: [/api/search, /api/export, /api/bulk]
+    - name: casual_browser
+      weight: 5.0
+      behavior:
+        request_rate: low
+        endpoints: [/api/products, /api/categories, /health]
+
+  entity_pool:
+    - "order-1001"
+    - "order-1002"
+    - "order-1003"
+    - "customer-42"
+    - "product-5678"
+
+  field_variations:
+    - field: latency_ms
+      jitter_percent: 5.0
+
+  templates:
+    fast_service:
+      rate: 100/s
+      error_rate: 0.005
+      latency_ms:
+        distribution: normal
+        mean: 10
+        stddev: 4
+
+  # ── Per-agent output routing ──────────────────────────────────────────
+  outputs:
+    - name: app_logs
+      type: console
+      format: json
+    - name: metrics
+      type: console
+      format: kv
+    - name: recording
+      type: recording
+      path: recordings/demo.jsonl
+
+  # ── Registry: load external agents ────────────────────────────────────
+  registry:
+    sources:
+      - "../agents/"
+    nginx:
+      v2: ../agents/nginx_v2.yaml
+    agents:
+      - ref: "nginx:v2"
+        name: nginx-frontend
+        overrides:
+          rate_per_second: 150
+
+  incidents:
+    - name: database_pressure
+      trigger: "time > 2m"
+      duration: 90s
+      effects:
+        - target: postgres
+          latency_multiplier: 8
+          error_rate: 0.15
+        - target: api-backend
+          error_rate: 0.08
+
+    - name: cache_failure
+      trigger: "time > 3m30s"
+      duration: 60s
+      effects:
+        - target: redis
+          error_rate: 0.20
+          latency_multiplier: 10
+
+  interactions:
+    - from: api-backend
+      to: postgres
+      type: dependency
+    - from: api-backend
+      to: redis
+      type: dependency
+    - from: nginx-frontend
+      to: api-backend
+      type: request
+
+  rules:
+    - when: "postgres.error_rate > 0.05"
+      propagate:
+        to: api-backend
+        latency_multiplier: 3.0
+        error_rate: 0.08
+
+  auto_cascade:
+    error_threshold: 0.10
+    dampening_factor: 0.5
+    blast_radius: 2
+
+  agents:
+    # ── API backend (uses template + phases) ────────────────────────────
+    - name: api-backend
+      type: api_service
+      use: fast_service
+      rate: 200/s
+      instances: 2
+      outputs: [app_logs, metrics, recording]
+      dependencies: [postgres, redis]
+      request_flow:
+        - call: redis
+          timeout_ms: 10
+          network_latency_ms: 1.0
+        - call: postgres
+          timeout_ms: 100
+          network_latency_ms: 2.0
+          network_jitter_ms: 0.5
+      phases:
+        - name: warmup
+          duration: 1m
+          rate: 50/s
+        - name: steady
+          duration: 2m
+          rate: 200/s
+        - name: peak
+          duration: 2m
+          rate: 400/s
+          error_rate: 0.03
+      message_template: "{method} {path} -> {status_code}"
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT, DELETE]
+          weights: [55, 25, 12, 8]
+        - name: path
+          generator: weighted_choice
+          values: [/api/search, /api/products, /api/orders, /api/users, /health]
+          weights: [25, 25, 20, 20, 10]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "400", "404", "500"]
+          weights: [72, 10, 6, 6, 6]
+        - name: request_id
+          generator: sequence
+          prefix: "req-"
+
+    # ── PostgreSQL with state-driven degradation ────────────────────────
+    - name: postgres
+      type: database
+      rate: 300/s
+      error_rate: 0.003
+      outputs: [app_logs, recording]
+      contention:
+        max_connections: 150
+        queue_latency_ms: [1, 40]
+      slow_queries:
+        probability: 0.02
+        latency_ms: [500, 3000]
+      state:
+        connection_count:
+          initial: 30
+          max: 150
+          growth_per_request: 0.008
+      effects:
+        - when: "connection_count > 100"
+          latency_multiplier: 2
+        - when: "connection_count > 140"
+          error_rate: 0.10
+      latency_ms:
+        distribution: percentile
+        p50: 3
+        p95: 15
+        p99: 50
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: [SELECT, INSERT, UPDATE, DELETE]
+          weights: [50, 25, 15, 10]
+        - name: table
+          generator: choice
+          values: [users, orders, products, sessions]
+      message_template: "{query_type} {table}"
+
+    # ── Redis with health state machine ─────────────────────────────────
+    - name: redis
+      type: cache
+      rate: 500/s
+      error_rate: 0.001
+      outputs: [metrics, recording]
+      health_state:
+        latency_multipliers: [1.0, 2.0, 5.0, 1.5]
+        error_rates: [0.0, 0.03, 0.20, 0.01]
+        transitions:
+          - { from: 0, to: 1, probability: 0.008 }
+          - { from: 1, to: 2, probability: 0.04 }
+          - { from: 2, to: 3, probability: 0.08 }
+          - { from: 3, to: 0, probability: 0.15 }
+      latency_ms:
+        distribution: percentile
+        p50: 0.5
+        p95: 2
+        p99: 5
+      fields:
+        - name: command
+          generator: weighted_choice
+          values: [GET, SET, DEL, MGET]
+          weights: [40, 30, 10, 20]
+        - name: result
+          generator: weighted_choice
+          values: [hit, miss, ok]
+          weights: [55, 35, 10]
+      message_template: "{command} -> {result}"

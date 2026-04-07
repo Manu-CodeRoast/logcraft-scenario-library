@@ -1,0 +1,23 @@
+agent:
+  name: auth
+  type: microservice
+  rate_per_second: 150
+  error_rate: 0.02
+  message_template: "Auth {action} for {user_id}: {result}"
+  latency_ms:
+    distribution: normal
+    mean: 8
+    stddev: 3
+  fields:
+    - name: action
+      generator: weighted_choice
+      values: ["validate_token", "login", "logout", "refresh_token", "password_reset"]
+      weights: [60, 15, 10, 10, 5]
+    - name: user_id
+      generator: sequence
+      prefix: "user-"
+      start: 1000
+    - name: result
+      generator: weighted_choice
+      values: ["success", "failure", "rate_limited", "expired"]
+      weights: [85, 7, 3, 5]

@@ -1,0 +1,37 @@
+# CDN / edge proxy agent — models CloudFront/Cloudflare style edge.
+agent:
+  name: cdn-edge
+  type: proxy
+  rate: 2000/s
+  error_rate: 0.002
+  latency_ms:
+    distribution: percentile
+    p50: 5
+    p95: 30
+    p99: 100
+  message_template: "{method} {path} -> {cache_status} {status_code} ({pop})"
+  fields:
+    - name: method
+      generator: weighted_choice
+      values: [GET, HEAD, POST, OPTIONS]
+      weights: [75, 10, 10, 5]
+    - name: path
+      generator: weighted_choice
+      values: [/static/js/app.js, /static/css/main.css, /images/logo.png, /api/v1/data, /index.html]
+      weights: [25, 20, 20, 20, 15]
+    - name: cache_status
+      generator: weighted_choice
+      values: [HIT, MISS, EXPIRED, BYPASS]
+      weights: [60, 20, 10, 10]
+    - name: status_code
+      generator: weighted_choice
+      values: ["200", "304", "404", "403", "500"]
+      weights: [70, 15, 8, 4, 3]
+    - name: pop
+      generator: choice
+      values: [CDG, LHR, IAD, NRT, SYD, GRU]
+    - name: response_bytes
+      generator: range
+      min: 200
+      max: 500000
+      integer: true

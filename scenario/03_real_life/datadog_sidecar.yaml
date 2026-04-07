@@ -1,0 +1,174 @@
+# Real-life: Application generating logs for Datadog Agent ingest.
+# Uses kv/logfmt format ideal for Datadog Log Pipeline parsing.
+# Per-agent routing sends app logs to file and metrics to StatsD.
+scenario:
+  name: datadog-sidecar
+  seed: 3030
+  duration: 10m
+
+  environment:
+    region: us-east-1
+    cluster: prod-api
+    version: v4.1.0
+
+  noise:
+    log_duplication_rate: 0.002
+    missing_fields_rate: 0.001
+    random_delay_ms: [0, 8]
+
+  templates:
+    node_service:
+      rate: 80/s
+      error_rate: 0.01
+      latency_ms:
+        distribution: percentile
+        p50: 15
+        p95: 60
+        p99: 200
+
+  # ── Outputs ───────────────────────────────────────────────────────────
+  # Datadog agent reads from log files (logfmt is easily parsed by DD pipelines)
+  # and receives StatsD metrics on port 8125.
+  outputs:
+    - name: dd_logs
+      type: file
+      format: kv
+      path: /var/log/app/application.log
+      max_size_bytes: 52428800
+      max_files: 5
+    - name: dd_metrics
+      type: statsd
+      host: 127.0.0.1
+      port: 8125
+      metrics_prefix: logcraft.prod
+      metrics_interval_seconds: 10
+    - name: dd_json
+      type: file
+      format: json
+      path: /var/log/app/structured.json
+      max_size_bytes: 52428800
+      max_files: 3
+
+  personas:
+    - name: api_consumer
+      weight: 3.0
+      behavior:
+        request_rate: high
+        endpoints: [/api/v1/users, /api/v1/orders, /api/v1/search]
+    - name: health_check
+      weight: 1.0
+      behavior:
+        request_rate: low
+        endpoints: [/health, /ready, /metrics]
+
+  incidents:
+    - name: memory_leak
+      trigger: "time > 4m"
+      duration: 3m
+      effects:
+        - target: api-server
+          latency_multiplier: 3
+          error_rate: 0.08
+        - target: worker
+          latency_multiplier: 2
+
+  interactions:
+    - from: api-server
+      to: worker
+      type: request
+    - from: worker
+      to: cache
+      type: dependency
+    - from: api-server
+      to: cache
+      type: dependency
+
+  agents:
+    # ── API Server ──────────────────────────────────────────────────────
+    - name: api-server
+      type: api_service
+      use: node_service
+      rate: 150/s
+      instances: 3
+      outputs: [dd_logs, dd_metrics, dd_json]
+      dependencies: [worker, cache]
+      request_flow:
+        - call: cache
+          timeout_ms: 10
+        - call: worker
+          timeout_ms: 200
+      phases:
+        - name: morning
+          duration: 3m
+          rate: 50/s
+        - name: peak
+          duration: 4m
+          rate: 200/s
+          error_rate: 0.02
+        - name: cooldown
+          duration: 3m
+          rate: 80/s
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT, DELETE, PATCH]
+          weights: [45, 25, 15, 10, 5]
+        - name: path
+          generator: weighted_choice
+          values: [/api/v1/users, /api/v1/orders, /api/v1/search, /health, /api/v1/products]
+          weights: [25, 25, 20, 15, 15]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "400", "404", "500", "503"]
+          weights: [68, 10, 6, 5, 6, 5]
+        - name: request_id
+          generator: sequence
+          prefix: "req-"
+      message_template: "{method} {path} -> {status_code}"
+
+    # ── Background worker ───────────────────────────────────────────────
+    - name: worker
+      type: api_service
+      use: node_service
+      rate: 60/s
+      outputs: [dd_logs, dd_metrics]
+      fields:
+        - name: job_type
+          generator: weighted_choice
+          values: [email, webhook, report, cleanup, sync]
+          weights: [30, 25, 20, 15, 10]
+        - name: duration_ms
+          generator: range
+          min: 50
+          max: 5000
+          integer: true
+        - name: status
+          generator: weighted_choice
+          values: [completed, failed, retried, timeout]
+          weights: [80, 8, 7, 5]
+      message_template: "Job {job_type}: {status} ({duration_ms}ms)"
+
+    # ── Redis cache ─────────────────────────────────────────────────────
+    - name: cache
+      type: cache
+      rate: 500/s
+      error_rate: 0.001
+      latency_ms:
+        distribution: percentile
+        p50: 0.5
+        p95: 2
+        p99: 5
+      outputs: [dd_metrics]
+      fields:
+        - name: command
+          generator: weighted_choice
+          values: [GET, SET, DEL, MGET, EXPIRE]
+          weights: [40, 25, 5, 20, 10]
+        - name: key_prefix
+          generator: choice
+          values: ["session:", "cache:", "rate_limit:"]
+        - name: result
+          generator: weighted_choice
+          values: [hit, miss, ok]
+          weights: [60, 30, 10]
+      message_template: "{command} {key_prefix}* -> {result}"

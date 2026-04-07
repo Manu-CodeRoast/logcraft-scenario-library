@@ -1,0 +1,371 @@
+scenario:
+  name: "microservices-observability"
+  seed: 7777
+  duration: 15m
+
+  environment:
+    region: eu-west-1
+    cluster: prod-platform
+    version: v2.8.0
+
+  noise:
+    log_duplication_rate: 0.005
+    missing_fields_rate: 0.002
+    random_delay_ms: [0, 10]
+
+  log_format:
+    type: json
+    fields:
+      - timestamp
+      - level
+      - service
+      - trace_id
+      - span_id
+      - message
+      - latency_ms
+      - region
+    field_variation:
+      - field: latency_ms
+        jitter: 0.05
+
+  users:
+    count: 10000
+    sessions:
+      duration: [1m, 30m]
+      requests_per_session: [5, 120]
+
+  personas:
+    - name: developer
+      behavior:
+        request_rate: low
+        endpoints: ["/api/debug", "/api/config", "/api/health"]
+    - name: automated_pipeline
+      behavior:
+        request_rate: high
+        endpoints: ["/api/ingest", "/api/transform", "/api/export"]
+    - name: dashboard_user
+      behavior:
+        request_rate: medium
+        endpoints: ["/api/query", "/api/dashboards", "/api/alerts"]
+
+  # ── Reusable templates ─────────────────────────────────────────────────
+
+  templates:
+    go_microservice:
+      rate: 100/s
+      error_rate: 0.008
+      latency_ms:
+        distribution: normal
+        mean: 12
+        stddev: 5
+
+    java_microservice:
+      rate: 60/s
+      error_rate: 0.012
+      latency_ms:
+        distribution: percentile
+        p50: 20
+        p95: 80
+        p99: 300
+
+    worker_service:
+      rate: 30/s
+      error_rate: 0.005
+      latency_ms:
+        distribution: normal
+        mean: 200
+        stddev: 80
+
+  # ── Incidents ──────────────────────────────────────────────────────────
+
+  incidents:
+    - name: cascading_timeout
+      trigger: "time > 6m"
+      effects:
+        - target: kafka-broker
+          latency_multiplier: 15
+        - target: stream-processor
+          error_rate: 0.25
+          latency_multiplier: 5
+        - target: api-gateway
+          error_rate: 0.10
+
+    - name: memory_pressure
+      trigger: "time > 10m"
+      effects:
+        - target: query-engine
+          latency_multiplier: 4
+          error_rate: 0.08
+        - target: storage-writer
+          latency_multiplier: 2
+
+  # ── Service mesh interactions ──────────────────────────────────────────
+
+  interactions:
+    - from: api-gateway
+      to: ingest-service
+      type: request
+    - from: api-gateway
+      to: query-engine
+      type: request
+    - from: ingest-service
+      to: kafka-broker
+      type: request
+    - from: kafka-broker
+      to: stream-processor
+      type: dependency
+    - from: stream-processor
+      to: storage-writer
+      type: request
+    - from: query-engine
+      to: storage-writer
+      type: dependency
+    - from: api-gateway
+      to: auth-proxy
+      type: request
+
+  rules:
+    - when: "kafka-broker.error_rate > 0.05"
+      propagate:
+        to: ingest-service
+        latency_multiplier: 5.0
+        error_rate: 0.15
+    - when: "stream-processor.error_rate > 0.10"
+      propagate:
+        to: query-engine
+        latency_multiplier: 2.0
+
+  outputs:
+    - type: console
+      format: json
+
+  # ── Agents ─────────────────────────────────────────────────────────────
+
+  agents:
+    # ── API Gateway (Go, scaled across 5 instances) ─────────────────────
+    - name: api-gateway
+      type: api_service
+      use: go_microservice
+      rate: 300/s
+      instances: 5
+      dependencies: [ingest-service, query-engine, auth-proxy]
+      request_flow:
+        - call: auth-proxy
+          timeout_ms: 20
+        - call: ingest-service
+          timeout_ms: 200
+        - call: query-engine
+          timeout_ms: 500
+      phases:
+        - name: morning-ramp
+          duration: 3m
+          rate: 100/s
+          latency_ms: [5, 20]
+        - name: business-hours
+          duration: 7m
+          rate: 300/s
+          latency_ms:
+            distribution: normal
+            mean: 15
+            stddev: 5
+        - name: batch-window
+          duration: 5m
+          rate: 500/s
+          error_rate: 0.02
+          latency_ms:
+            distribution: percentile
+            p50: 20
+            p95: 80
+            p99: 250
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: ["POST", "GET", "PUT", "DELETE"]
+          weights: [40, 40, 15, 5]
+        - name: path
+          generator: weighted_choice
+          values: ["/api/ingest", "/api/query", "/api/dashboards", "/api/alerts", "/api/config"]
+          weights: [35, 30, 15, 15, 5]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "400", "404", "500", "502", "503"]
+          weights: [70, 10, 5, 3, 5, 4, 3]
+        - name: request_size_bytes
+          generator: range
+          min: 200
+          max: 50000
+          integer: true
+      message_template: "{method} {path} -> {status_code}"
+
+    # ── Ingest Service (Go) ─────────────────────────────────────────────
+    - name: ingest-service
+      type: api_service
+      use: go_microservice
+      rate: 250/s
+      instances: 3
+      dependencies: [kafka-broker]
+      latency_ms:
+        distribution: normal
+        mean: 8
+        stddev: 3
+      fields:
+        - name: pipeline
+          generator: weighted_choice
+          values: ["logs", "metrics", "traces", "events"]
+          weights: [40, 30, 20, 10]
+        - name: batch_size
+          generator: range
+          min: 1
+          max: 500
+          integer: true
+        - name: compression
+          generator: weighted_choice
+          values: ["gzip", "snappy", "none"]
+          weights: [50, 40, 10]
+      message_template: "Ingest {pipeline}: batch={batch_size} compression={compression}"
+
+    # ── Kafka Broker ────────────────────────────────────────────────────
+    - name: kafka-broker
+      type: database
+      rate_per_second: 800
+      error_rate: 0.002
+      contention:
+        max_connections: 500
+        queue_latency_ms: [0, 20]
+      latency_ms:
+        distribution: percentile
+        p50: 1
+        p95: 5
+        p99: 15
+      fields:
+        - name: topic
+          generator: weighted_choice
+          values: ["raw-logs", "raw-metrics", "raw-traces", "processed-events"]
+          weights: [40, 30, 20, 10]
+        - name: partition
+          generator: range
+          min: 0
+          max: 31
+          integer: true
+        - name: offset
+          generator: sequence
+          start: 1000000
+          prefix: ""
+      message_template: "Produce {topic}[{partition}] offset={offset}"
+
+    # ── Stream Processor (Java / Flink) ─────────────────────────────────
+    - name: stream-processor
+      type: api_service
+      use: java_microservice
+      instances: 4
+      dependencies: [kafka-broker, storage-writer]
+      state:
+        backlog_size:
+          initial: 0
+          max: 100000
+          growth_per_request: 0.5
+      effects:
+        - when: "backlog_size > 50000"
+          latency_multiplier: 2
+        - when: "backlog_size > 80000"
+          error_rate: 0.05
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: ["parse", "enrich", "aggregate", "route"]
+          weights: [30, 25, 25, 20]
+        - name: records_processed
+          generator: range
+          min: 100
+          max: 10000
+          integer: true
+        - name: checkpoint_id
+          generator: sequence
+          start: 1
+          prefix: "chk-"
+      message_template: "{operation}: {records_processed} records (checkpoint {checkpoint_id})"
+
+    # ── Storage Writer (Go) ─────────────────────────────────────────────
+    - name: storage-writer
+      type: database
+      use: worker_service
+      rate: 150/s
+      instances: 2
+      contention:
+        max_connections: 100
+        queue_latency_ms: [5, 100]
+      slow_queries:
+        probability: 0.02
+        latency_ms: [1000, 8000]
+      latency_ms:
+        distribution: percentile
+        p50: 15
+        p95: 80
+        p99: 300
+      fields:
+        - name: store
+          generator: weighted_choice
+          values: ["columnar", "object-storage", "index"]
+          weights: [50, 30, 20]
+        - name: bytes_written
+          generator: range
+          min: 1024
+          max: 10485760
+          integer: true
+      message_template: "Write {store}: {bytes_written} bytes"
+
+    # ── Query Engine (Java) ─────────────────────────────────────────────
+    - name: query-engine
+      type: api_service
+      use: java_microservice
+      instances: 3
+      dependencies: [storage-writer]
+      state:
+        active_queries:
+          initial: 0
+          max: 500
+          growth_per_request: 0.2
+      effects:
+        - when: "active_queries > 200"
+          latency_multiplier: 3
+        - when: "active_queries > 400"
+          error_rate: 0.10
+      latency_ms:
+        distribution: percentile
+        p50: 30
+        p95: 200
+        p99: 1500
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: ["aggregate", "scan", "point_lookup", "time_range"]
+          weights: [25, 15, 30, 30]
+        - name: time_range_hours
+          generator: range
+          min: 1
+          max: 168
+          integer: true
+        - name: rows_scanned
+          generator: range
+          min: 100
+          max: 10000000
+          integer: true
+      message_template: "{query_type} over {time_range_hours}h ({rows_scanned} rows scanned)"
+
+    # ── Auth Proxy (Go, lightweight) ────────────────────────────────────
+    - name: auth-proxy
+      type: api_service
+      use: go_microservice
+      rate: 400/s
+      instances: 2
+      latency_ms: [1, 5]
+      fields:
+        - name: action
+          generator: weighted_choice
+          values: ["validate_jwt", "refresh_token", "check_permissions"]
+          weights: [75, 15, 10]
+        - name: result
+          generator: weighted_choice
+          values: ["ok", "expired", "denied", "error"]
+          weights: [90, 5, 3, 2]
+      message_template: "{action}: {result}"

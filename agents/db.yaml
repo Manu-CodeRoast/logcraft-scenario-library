@@ -1,0 +1,35 @@
+agent:
+  name: postgres
+  type: database
+  rate_per_second: 300
+  error_rate: 0.005
+  message_template: "{query_type} {table} ({row_count} rows, {query_time_ms}ms)"
+  contention:
+    max_connections: 100
+    queue_latency_ms: [1, 50]
+  slow_queries:
+    probability: 0.02
+    latency_ms: [300, 3000]
+  latency_ms:
+    distribution: percentile
+    p50: 3
+    p95: 20
+    p99: 80
+  fields:
+    - name: query_type
+      generator: weighted_choice
+      values: ["SELECT", "INSERT", "UPDATE", "DELETE"]
+      weights: [60, 20, 15, 5]
+    - name: table
+      generator: choice
+      values: ["users", "orders", "products", "sessions", "audit_log"]
+    - name: query_time_ms
+      generator: range
+      min: 0
+      max: 200
+      integer: true
+    - name: row_count
+      generator: range
+      min: 0
+      max: 1000
+      integer: true

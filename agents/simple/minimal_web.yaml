@@ -1,0 +1,19 @@
+# Minimal web server agent — the simplest possible agent definition.
+# Use this as a starting point for new agents.
+agent:
+  name: simple-web
+  type: web_server
+  rate: 10/s
+  message_template: "{method} {path} -> {status_code}"
+  fields:
+    - name: method
+      generator: weighted_choice
+      values: [GET, POST]
+      weights: [80, 20]
+    - name: path
+      generator: choice
+      values: [/api/users, /api/orders, /health]
+    - name: status_code
+      generator: weighted_choice
+      values: ["200", "404", "500"]
+      weights: [90, 7, 3]

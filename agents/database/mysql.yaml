@@ -1,0 +1,39 @@
+# MySQL database agent.
+agent:
+  name: mysql
+  type: database
+  rate: 250/s
+  error_rate: 0.004
+  contention:
+    max_connections: 150
+    queue_latency_ms: [1, 30]
+  slow_queries:
+    probability: 0.025
+    latency_ms: [300, 3000]
+  latency_ms:
+    distribution: percentile
+    p50: 5
+    p95: 25
+    p99: 80
+  message_template: "{query_type} {database}.{table}: {status}"
+  fields:
+    - name: query_type
+      generator: weighted_choice
+      values: [SELECT, INSERT, UPDATE, DELETE, ALTER, CREATE]
+      weights: [50, 20, 15, 8, 4, 3]
+    - name: database
+      generator: weighted_choice
+      values: [app_production, app_analytics, app_auth]
+      weights: [60, 25, 15]
+    - name: table
+      generator: choice
+      values: [users, orders, products, payments, audit_log]
+    - name: status
+      generator: weighted_choice
+      values: [ok, lock_wait, deadlock, timeout]
+      weights: [90, 5, 3, 2]
+    - name: rows_examined
+      generator: range
+      min: 0
+      max: 50000
+      integer: true

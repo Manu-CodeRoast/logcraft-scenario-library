@@ -1,0 +1,137 @@
+# Starter 07 — Incident Response
+# A 3-service app where a database overload causes cascading failures.
+# Concepts: incidents, effects, interactions, rules, templates
+scenario:
+  name: incident-response
+  seed: 42
+  duration: 5m
+
+  templates:
+    api_service:
+      rate: 5/s
+      error_rate: 0.01
+      latency_ms:
+        distribution: normal
+        mean: 25
+        stddev: 8
+
+  # At 2 minutes the database slows down, then at 3 minutes the cache fails.
+  # Watch how errors cascade from database → order-service → api-gateway.
+  incidents:
+    - name: database_overload
+      trigger: "time > 2m"
+      duration: 90s
+      effects:
+        - target: postgres
+          latency_multiplier: 8
+          error_rate: 0.20
+        - target: order-service
+          latency_multiplier: 3
+          error_rate: 0.10
+
+    - name: cache_failure
+      trigger: "time > 3m"
+      duration: 60s
+      effects:
+        - target: redis-cache
+          latency_multiplier: 15
+          error_rate: 0.25
+
+  interactions:
+    - from: api-gateway
+      to: order-service
+      type: request
+    - from: order-service
+      to: postgres
+      type: dependency
+    - from: order-service
+      to: redis-cache
+      type: dependency
+
+  rules:
+    - when: "postgres.error_rate > 0.05"
+      propagate:
+        to: order-service
+        latency_multiplier: 2.0
+    - when: "order-service.error_rate > 0.1"
+      propagate:
+        to: api-gateway
+        error_rate: 0.08
+
+  outputs:
+    - name: log-aggregator
+      type: http
+      url: http://ingest.logcraft.demo/v1/logs
+      format: json
+
+  agents:
+    - name: api-gateway
+      type: web_server
+      use: api_service
+      message_template: "{method} {path} -> {status_code}"
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT, DELETE]
+          weights: [60, 25, 10, 5]
+        - name: path
+          generator: choice
+          values: [/api/orders, /api/products, /api/users, /health]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "404", "500"]
+          weights: [80, 10, 7, 3]
+
+    - name: order-service
+      type: api_service
+      use: api_service
+      rate: 3/s
+      message_template: "Order {order_id}: {action}"
+      fields:
+        - name: order_id
+          generator: sequence
+          prefix: "ORD-"
+          start: 1000
+        - name: action
+          generator: weighted_choice
+          values: [create, update, cancel, complete]
+          weights: [50, 20, 10, 20]
+
+    - name: postgres
+      type: database
+      rate: 8/s
+      error_rate: 0.005
+      latency_ms:
+        distribution: percentile
+        p50: 3
+        p95: 15
+        p99: 50
+      message_template: "{query_type} {table} ({row_count} rows)"
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: [SELECT, INSERT, UPDATE, DELETE]
+          weights: [60, 20, 15, 5]
+        - name: table
+          generator: choice
+          values: [orders, products, users]
+        - name: row_count
+          generator: range
+          min: 0
+          max: 100
+          integer: true
+
+    - name: redis-cache
+      type: cache
+      rate: 10/s
+      error_rate: 0.001
+      latency_ms: [0, 2]
+      message_template: "{operation} {key_prefix}*"
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: [GET, SET, DEL, MGET]
+          weights: [50, 30, 10, 10]
+        - name: key_prefix
+          generator: choice
+          values: ["product:", "session:", "cart:"]

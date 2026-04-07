@@ -1,0 +1,374 @@
+# Daily runner: 24-hour production simulation with business-hours traffic.
+# Uses rate modulation to simulate realistic daily traffic patterns.
+# Run with: LogCraft data/scenario/daily/production_24h.yaml
+scenario:
+  name: production-24h
+  seed: 20260330
+  duration: 24h
+
+  environment:
+    region: us-east-1
+    cluster: prod-main
+    version: v3.8.0
+
+  noise:
+    log_duplication_rate: 0.003
+    missing_fields_rate: 0.001
+    random_delay_ms: [0, 10]
+
+  users:
+    count: 100000
+    sessions:
+      duration: [1m, 30m]
+      requests_per_session: [5, 100]
+
+  personas:
+    - name: power_user
+      weight: 1.0
+      behavior:
+        request_rate: high
+        endpoints: [/api/search, /api/export, /api/analytics]
+    - name: regular_user
+      weight: 5.0
+      behavior:
+        request_rate: medium
+        endpoints: [/api/products, /api/orders, /api/profile]
+    - name: bot_crawler
+      weight: 2.0
+      behavior:
+        request_rate: high
+        endpoints: [/sitemap.xml, /robots.txt, /api/products]
+
+  templates:
+    prod_service:
+      rate: 100/s
+      error_rate: 0.005
+      latency_ms:
+        distribution: percentile
+        p50: 12
+        p95: 50
+        p99: 200
+
+  # ── Outputs: file logs + metrics ──────────────────────────────────────
+  outputs:
+    - name: app_logs
+      type: file
+      format: json
+      path: logs/daily/app.log
+      max_size_bytes: 104857600
+      max_files: 10
+    - name: access_logs
+      type: file
+      format: clf
+      path: logs/daily/access.log
+      max_size_bytes: 104857600
+      max_files: 10
+    - name: metrics
+      type: statsd
+      host: 127.0.0.1
+      port: 8125
+      metrics_prefix: logcraft.daily
+      metrics_interval_seconds: 30
+    - name: recording
+      type: recording
+      path: recordings/daily.jsonl
+
+  # ── Incidents: realistic daily incidents ──────────────────────────────
+  incidents:
+    # Morning deployment causes brief instability
+    - name: morning_deploy
+      trigger: "time > 2h"
+      duration: 10m
+      effects:
+        - target: api-gateway
+          latency_multiplier: 3
+          error_rate: 0.05
+        - target: order-service
+          error_rate: 0.03
+
+    # Midday traffic spike from marketing campaign
+    - name: marketing_campaign
+      trigger: "time > 6h"
+      duration: 2h
+      effects:
+        - target: api-gateway
+          latency_multiplier: 2
+        - target: product-service
+          latency_multiplier: 3
+
+    # Afternoon database maintenance
+    - name: db_maintenance
+      trigger: "time > 10h"
+      duration: 30m
+      effects:
+        - target: postgres-primary
+          latency_multiplier: 10
+          error_rate: 0.08
+        - target: order-service
+          error_rate: 0.12
+          latency_multiplier: 4
+
+    # Evening cache eviction storm
+    - name: cache_eviction
+      trigger: "time > 16h"
+      duration: 45m
+      effects:
+        - target: redis-cache
+          latency_multiplier: 5
+          error_rate: 0.10
+
+    # Night batch processing load
+    - name: batch_processing
+      trigger: "time > 22h"
+      effects:
+        - target: postgres-primary
+          latency_multiplier: 2
+        - target: worker
+          latency_multiplier: 3
+
+  interactions:
+    - from: api-gateway
+      to: order-service
+      type: request
+    - from: api-gateway
+      to: product-service
+      type: request
+    - from: api-gateway
+      to: auth-service
+      type: request
+    - from: order-service
+      to: postgres-primary
+      type: dependency
+    - from: order-service
+      to: redis-cache
+      type: dependency
+    - from: product-service
+      to: redis-cache
+      type: dependency
+
+  rules:
+    - when: "postgres-primary.error_rate > 0.05"
+      propagate:
+        to: order-service
+        latency_multiplier: 4.0
+        error_rate: 0.10
+    - when: "redis-cache.error_rate > 0.05"
+      propagate:
+        to: product-service
+        latency_multiplier: 2.0
+        error_rate: 0.05
+
+  auto_cascade:
+    error_threshold: 0.08
+    dampening_factor: 0.5
+    blast_radius: 3
+
+  agents:
+    # ── API Gateway with business-hours modulation ──────────────────────
+    - name: api-gateway
+      type: api_service
+      use: prod_service
+      rate: 300/s
+      instances: 4
+      outputs: [app_logs, access_logs, metrics, recording]
+      dependencies: [order-service, product-service, auth-service]
+      rate_modulation:
+        type: business_hours
+        peak_multiplier: 1.0
+        off_peak_multiplier: 0.15
+        peak_start_hour: 8
+        peak_end_hour: 22
+      request_flow:
+        - call: auth-service
+          timeout_ms: 20
+          network_latency_ms: 1.0
+        - call: order-service
+          timeout_ms: 200
+          network_latency_ms: 2.0
+          network_jitter_ms: 0.5
+        - call: product-service
+          timeout_ms: 100
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT, DELETE, PATCH]
+          weights: [50, 22, 12, 8, 8]
+        - name: path
+          generator: weighted_choice
+          values: [/api/products, /api/orders, /api/users, /api/search, /health, /api/analytics]
+          weights: [25, 22, 18, 15, 10, 10]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "301", "400", "404", "500", "502", "503"]
+          weights: [65, 10, 3, 5, 5, 5, 4, 3]
+        - name: request_id
+          generator: sequence
+          prefix: "req-"
+      message_template: "{method} {path} -> {status_code}"
+
+    # ── Order service ───────────────────────────────────────────────────
+    - name: order-service
+      type: api_service
+      use: prod_service
+      rate: 80/s
+      instances: 2
+      outputs: [app_logs, metrics]
+      dependencies: [postgres-primary, redis-cache]
+      rate_modulation:
+        type: sinusoidal
+        amplitude_factor: 0.4
+        period_seconds: 86400
+      health_state:
+        latency_multipliers: [1.0, 2.0, 5.0, 1.5]
+        error_rates: [0.005, 0.03, 0.15, 0.01]
+        transitions:
+          - { from: 0, to: 1, probability: 0.005 }
+          - { from: 1, to: 2, probability: 0.03 }
+          - { from: 2, to: 3, probability: 0.08 }
+          - { from: 3, to: 0, probability: 0.12 }
+      fields:
+        - name: action
+          generator: weighted_choice
+          values: [create, read, update, cancel, refund]
+          weights: [30, 35, 15, 12, 8]
+        - name: result
+          generator: weighted_choice
+          values: [success, validation_error, not_found, internal_error]
+          weights: [82, 8, 5, 5]
+      message_template: "Order {action}: {result}"
+
+    # ── Product service ─────────────────────────────────────────────────
+    - name: product-service
+      type: api_service
+      use: prod_service
+      rate: 120/s
+      outputs: [app_logs, metrics]
+      dependencies: [redis-cache]
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: [search, get, list_category, get_recommendations]
+          weights: [35, 30, 20, 15]
+        - name: category
+          generator: choice
+          values: [electronics, clothing, books, home, sports]
+        - name: result_count
+          generator: range
+          min: 0
+          max: 200
+          integer: true
+      message_template: "{operation} {category}: {result_count} results"
+
+    # ── Auth service ────────────────────────────────────────────────────
+    - name: auth-service
+      type: api_service
+      use: prod_service
+      rate: 200/s
+      outputs: [app_logs]
+      latency_ms:
+        distribution: percentile
+        p50: 5
+        p95: 15
+        p99: 40
+      fields:
+        - name: action
+          generator: weighted_choice
+          values: [validate_token, refresh, login, logout]
+          weights: [60, 20, 12, 8]
+        - name: result
+          generator: weighted_choice
+          values: [ok, expired, invalid, rate_limited]
+          weights: [85, 8, 5, 2]
+      message_template: "Auth {action}: {result}"
+
+    # ── PostgreSQL ──────────────────────────────────────────────────────
+    - name: postgres-primary
+      type: database
+      rate: 200/s
+      error_rate: 0.003
+      outputs: [app_logs, metrics]
+      contention:
+        max_connections: 200
+        queue_latency_ms: [1, 40]
+      slow_queries:
+        probability: 0.015
+        latency_ms: [500, 5000]
+      state:
+        connection_count:
+          initial: 40
+          max: 200
+          growth_per_request: 0.005
+      effects:
+        - when: "connection_count > 150"
+          latency_multiplier: 2
+        - when: "connection_count > 190"
+          error_rate: 0.08
+      latency_ms:
+        distribution: percentile
+        p50: 3
+        p95: 15
+        p99: 50
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: [SELECT, INSERT, UPDATE, DELETE]
+          weights: [50, 25, 15, 10]
+        - name: table
+          generator: choice
+          values: [users, orders, products, inventory, sessions]
+      message_template: "{query_type} {table}"
+
+    # ── Redis cache ─────────────────────────────────────────────────────
+    - name: redis-cache
+      type: cache
+      rate: 800/s
+      error_rate: 0.001
+      outputs: [metrics]
+      latency_ms:
+        distribution: percentile
+        p50: 0.5
+        p95: 2
+        p99: 5
+      fields:
+        - name: command
+          generator: weighted_choice
+          values: [GET, SET, DEL, MGET, EXPIRE]
+          weights: [40, 25, 5, 20, 10]
+        - name: result
+          generator: weighted_choice
+          values: [hit, miss, ok]
+          weights: [58, 32, 10]
+      message_template: "{command} -> {result}"
+
+    # ── Background worker ───────────────────────────────────────────────
+    - name: worker
+      type: worker
+      rate: 15/s
+      error_rate: 0.008
+      outputs: [app_logs]
+      rate_modulation:
+        type: business_hours
+        peak_multiplier: 0.3
+        off_peak_multiplier: 1.0
+        peak_start_hour: 8
+        peak_end_hour: 20
+      latency_ms:
+        distribution: percentile
+        p50: 200
+        p95: 2000
+        p99: 10000
+      fields:
+        - name: job_type
+          generator: weighted_choice
+          values: [email, report, cleanup, sync, export, import]
+          weights: [25, 20, 15, 15, 15, 10]
+        - name: status
+          generator: weighted_choice
+          values: [completed, failed, retried, timeout]
+          weights: [82, 7, 6, 5]
+        - name: duration_ms
+          generator: range
+          min: 100
+          max: 30000
+          integer: true
+      message_template: "Job {job_type}: {status} ({duration_ms}ms)"

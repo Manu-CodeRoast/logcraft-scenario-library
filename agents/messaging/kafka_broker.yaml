@@ -1,0 +1,41 @@
+# Kafka broker agent — models message broker with topic/partition logging.
+agent:
+  name: kafka-broker
+  type: message_queue
+  rate: 500/s
+  error_rate: 0.002
+  contention:
+    max_connections: 500
+    queue_latency_ms: [0, 20]
+  latency_ms:
+    distribution: percentile
+    p50: 1
+    p95: 5
+    p99: 15
+  message_template: "{operation} {topic}[{partition}] offset={offset}"
+  fields:
+    - name: operation
+      generator: weighted_choice
+      values: [Produce, Consume, Fetch, Commit]
+      weights: [40, 35, 15, 10]
+    - name: topic
+      generator: weighted_choice
+      values: [app-logs, app-metrics, app-events, dead-letter]
+      weights: [40, 30, 20, 10]
+    - name: partition
+      generator: range
+      min: 0
+      max: 31
+      integer: true
+    - name: offset
+      generator: sequence
+      start: 1000000
+      prefix: ""
+    - name: consumer_group
+      generator: choice
+      values: [indexer, alerting, archiver, analytics]
+    - name: batch_size
+      generator: range
+      min: 1
+      max: 500
+      integer: true

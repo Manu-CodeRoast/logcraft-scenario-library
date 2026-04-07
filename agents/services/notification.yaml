@@ -1,0 +1,32 @@
+# Email / notification service agent.
+agent:
+  name: notification-service
+  type: api_service
+  rate: 80/s
+  error_rate: 0.015
+  latency_ms:
+    distribution: percentile
+    p50: 50
+    p95: 200
+    p99: 1000
+  message_template: "Send {channel} notification: {template} to {recipient_type} -> {delivery_status}"
+  fields:
+    - name: channel
+      generator: weighted_choice
+      values: [email, sms, push, webhook, slack]
+      weights: [35, 20, 25, 10, 10]
+    - name: template
+      generator: choice
+      values: [order_confirmation, password_reset, shipping_update, alert_critical, welcome, invoice]
+    - name: recipient_type
+      generator: weighted_choice
+      values: [customer, admin, system, partner]
+      weights: [60, 15, 15, 10]
+    - name: delivery_status
+      generator: weighted_choice
+      values: [delivered, queued, bounced, failed, rate_limited]
+      weights: [70, 15, 5, 5, 5]
+    - name: priority
+      generator: weighted_choice
+      values: [high, normal, low]
+      weights: [15, 70, 15]

@@ -1,0 +1,123 @@
+scenario:
+  agents:
+    - name: "nginx-proxy"
+      type: "web_server"
+      rate_per_second: 1
+      log_level: info
+      error_rate: 0.05
+      message_template: "{method} {path} -> {status_code} ({response_time_ms}ms)"
+      phases:
+        - name: warmup
+          duration: 30s
+          rate: 20/s
+          latency_ms: [5, 20]
+        - name: steady
+          duration: 3m
+          rate: 100/s
+          latency_ms:
+            distribution: normal
+            mean: 40
+            stddev: 15
+        - name: peak
+          duration: 90s
+          rate: 200/s
+          error_rate: 0.08
+          latency_ms:
+            distribution: percentile
+            p50: 50
+            p95: 200
+            p99: 500
+      fields:
+        - name: "method"
+          generator: weighted_choice
+          values: ["GET", "POST", "PUT", "DELETE"]
+          weights: [60, 25, 10, 5]
+
+        - name: "status_code"
+          generator: weighted_choice
+          values: ["200", "301", "404", "500"]
+          weights: [80, 5, 10, 5]
+
+        - name: "outcome"
+          generator: conditional
+          condition_field: status_code
+          branches:
+            "500":
+              generator: static
+              value: server_error
+            "404":
+              generator: static
+              value: client_error
+          default:
+            generator: static
+            value: success
+
+        - name: "response_time_ms"
+          generator: normal
+          mean: 45
+          stddev: 20
+
+        - name: "path"
+          generator: choice
+          values: ["/api/users", "/api/orders", "/health", "/api/products"]
+
+        - name: "request_id"
+          generator: sequence
+          prefix: "req-"
+
+    - name: "auth-service"
+      type: "microservice"
+      start_after: 5s
+      rate_per_second: 1
+      log_level: info
+      error_rate: 0.02
+      message_template: "Auth {action} for user {user_id}: {result}"
+      latency_ms:
+        distribution: normal
+        mean: 15
+        stddev: 5
+      fields:
+        - name: "action"
+          generator: weighted_choice
+          values: ["login", "logout", "token_refresh", "password_reset"]
+          weights: [50, 20, 25, 5]
+
+        - name: "user_id"
+          generator: sequence
+          prefix: "user-"
+          start: 1000
+
+        - name: "result"
+          generator: weighted_choice
+          values: ["success", "failure", "rate_limited"]
+          weights: [85, 10, 5]
+
+    - name: "db-monitor"
+      type: "database"
+      start_after: 15s
+      rate_per_second: 1
+      log_level: debug
+      error_rate: 0.01
+      message_template: "Query on {table}: {query_time_ms}ms ({row_count} rows)"
+      contention:
+        max_connections: 50
+        queue_latency_ms: [2, 100]
+      slow_queries:
+        probability: 0.03
+        latency_ms: [200, 1500]
+      fields:
+        - name: "table"
+          generator: choice
+          values: ["users", "orders", "products", "sessions", "audit_log"]
+
+        - name: "query_time_ms"
+          generator: range
+          min: 0
+          max: 200
+          integer: true
+
+        - name: "row_count"
+          generator: range
+          min: 0
+          max: 1000
+          integer: true

@@ -1,0 +1,69 @@
+# Starter 06 — Format Gallery
+# Same traffic in 10 different log formats at once.
+# Concepts: output formats (json, clf, syslog, ecs, otel, kv, log4j, etc.)
+scenario:
+  name: format-gallery
+  seed: 42
+  duration: 2m
+
+  outputs:
+    - type: console
+      format: json
+    - type: file
+      path: logs/gallery.log
+      formats:
+        - json
+        - text
+        - clf
+        - syslog
+        - rfc5424
+        - kv
+        - ecs
+        - otel
+        - log4j
+        - cloudwatch
+
+  agents:
+    - name: web-app
+      type: web_server
+      rate: 3/s
+      error_rate: 0.05
+      latency_ms:
+        distribution: normal
+        mean: 30
+        stddev: 10
+      message_template: "{method} {path} -> {status_code}"
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT, DELETE]
+          weights: [60, 25, 10, 5]
+        - name: path
+          generator: choice
+          values: [/api/users, /api/orders, /api/products, /health]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "404", "500"]
+          weights: [78, 10, 7, 5]
+        - name: bytes_sent
+          generator: range
+          min: 200
+          max: 50000
+          integer: true
+        - name: user_agent
+          generator: choice
+          values: ["Mozilla/5.0", "curl/8.4.0", "Python-requests/2.31"]
+        - name: host
+          generator: static
+          value: "web-prod-01"
+        - name: pid
+          generator: range
+          min: 1000
+          max: 9999
+          integer: true
+        - name: component
+          generator: static
+          value: "web-app"
+        - name: thread
+          generator: choice
+          values: [main, worker-1, worker-2, worker-3]

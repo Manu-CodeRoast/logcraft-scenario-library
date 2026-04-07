@@ -1,0 +1,53 @@
+# Starter 05 — Phases
+# Agent behavior changes over time: warmup → steady → peak.
+# Concepts: phases, rate changes, latency distributions (uniform, normal, percentile)
+scenario:
+  name: phases-demo
+  seed: 42
+  duration: 5m
+
+  outputs:
+    - name: log-aggregator
+      type: http
+      url: http://ingest.logcraft.demo/v1/logs
+      format: json
+
+  agents:
+    - name: api-server
+      type: web_server
+      rate: 5/s
+      error_rate: 0.02
+      message_template: "{method} {path} -> {status_code}"
+      phases:
+        - name: warmup
+          duration: 1m
+          rate: 2/s
+          latency_ms: [5, 20]
+        - name: steady
+          duration: 2m
+          rate: 5/s
+          latency_ms:
+            distribution: normal
+            mean: 25
+            stddev: 8
+        - name: peak
+          duration: 2m
+          rate: 10/s
+          error_rate: 0.08
+          latency_ms:
+            distribution: percentile
+            p50: 40
+            p95: 200
+            p99: 600
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT, DELETE]
+          weights: [60, 25, 10, 5]
+        - name: path
+          generator: choice
+          values: [/api/users, /api/orders, /health]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "404", "500"]
+          weights: [88, 8, 4]

@@ -1,0 +1,214 @@
+# Real-life: Application sending logs to Splunk via syslog + HEC.
+# Uses rfc5424 syslog format (Splunk TCP/UDP input) and JSON (Splunk HEC).
+scenario:
+  name: splunk-forwarder
+  seed: 5555
+  duration: 10m
+
+  environment:
+    region: us-west-2
+    cluster: prod-finance
+    version: v5.0.1
+
+  noise:
+    log_duplication_rate: 0.002
+    missing_fields_rate: 0.001
+    random_delay_ms: [0, 10]
+
+  templates:
+    java_service:
+      rate: 60/s
+      error_rate: 0.01
+      latency_ms:
+        distribution: percentile
+        p50: 25
+        p95: 100
+        p99: 400
+
+  # ── Outputs: syslog for Splunk TCP input, JSON for HEC ───────────────
+  outputs:
+    - name: splunk_syslog
+      type: file
+      format: rfc5424
+      path: logs/splunk-syslog.log
+      max_size_bytes: 104857600
+      max_files: 10
+    - name: splunk_hec
+      type: file
+      format: json
+      path: logs/splunk-hec.ndjson
+      max_size_bytes: 52428800
+      max_files: 5
+    - name: monitoring
+      type: console
+      format: text
+
+  incidents:
+    - name: db_failover
+      trigger: "time > 4m"
+      duration: 2m
+      effects:
+        - target: trading-db
+          latency_multiplier: 15
+          error_rate: 0.20
+        - target: order-engine
+          error_rate: 0.15
+        - target: risk-calculator
+          latency_multiplier: 3
+
+    - name: market_spike
+      trigger: "time > 7m"
+      effects:
+        - target: order-engine
+          latency_multiplier: 4
+        - target: market-data-feed
+          latency_multiplier: 2
+
+  interactions:
+    - from: order-engine
+      to: trading-db
+      type: dependency
+    - from: order-engine
+      to: risk-calculator
+      type: request
+    - from: risk-calculator
+      to: market-data-feed
+      type: dependency
+
+  rules:
+    - when: "trading-db.error_rate > 0.05"
+      propagate:
+        to: order-engine
+        latency_multiplier: 5.0
+        error_rate: 0.10
+
+  agents:
+    # ── Order execution engine ──────────────────────────────────────────
+    - name: order-engine
+      type: api_service
+      use: java_service
+      rate: 100/s
+      instances: 2
+      outputs: [splunk_syslog, splunk_hec, monitoring]
+      dependencies: [trading-db, risk-calculator]
+      request_flow:
+        - call: risk-calculator
+          timeout_ms: 50
+        - call: trading-db
+          timeout_ms: 100
+      fields:
+        - name: order_type
+          generator: weighted_choice
+          values: [market, limit, stop, stop_limit]
+          weights: [40, 35, 15, 10]
+        - name: symbol
+          generator: choice
+          values: [AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA]
+        - name: quantity
+          generator: range
+          min: 1
+          max: 10000
+          integer: true
+        - name: result
+          generator: weighted_choice
+          values: [filled, partial, rejected, cancelled, pending]
+          weights: [60, 15, 8, 7, 10]
+        - name: host
+          generator: static
+          value: "order-engine-prod"
+        - name: pid
+          generator: range
+          min: 1000
+          max: 9999
+          integer: true
+      message_template: "{order_type} {symbol} x{quantity}: {result}"
+
+    # ── Risk calculator ─────────────────────────────────────────────────
+    - name: risk-calculator
+      type: api_service
+      use: java_service
+      rate: 80/s
+      outputs: [splunk_syslog, monitoring]
+      latency_ms:
+        distribution: percentile
+        p50: 5
+        p95: 20
+        p99: 50
+      fields:
+        - name: check_type
+          generator: weighted_choice
+          values: [margin, exposure, concentration, velocity]
+          weights: [35, 25, 25, 15]
+        - name: result
+          generator: weighted_choice
+          values: [pass, warning, block]
+          weights: [80, 12, 8]
+        - name: host
+          generator: static
+          value: "risk-calc-prod"
+      message_template: "Risk check {check_type}: {result}"
+
+    # ── Trading database ────────────────────────────────────────────────
+    - name: trading-db
+      type: database
+      rate: 200/s
+      error_rate: 0.003
+      contention:
+        max_connections: 100
+        queue_latency_ms: [1, 30]
+      slow_queries:
+        probability: 0.01
+        latency_ms: [200, 3000]
+      latency_ms:
+        distribution: percentile
+        p50: 2
+        p95: 10
+        p99: 40
+      outputs: [splunk_hec, monitoring]
+      state:
+        connection_count:
+          initial: 30
+          max: 100
+          growth_per_request: 0.005
+      effects:
+        - when: "connection_count > 80"
+          latency_multiplier: 3
+        - when: "connection_count > 95"
+          error_rate: 0.15
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: [SELECT, INSERT, UPDATE]
+          weights: [50, 30, 20]
+        - name: table
+          generator: choice
+          values: [orders, positions, accounts, market_data]
+        - name: host
+          generator: static
+          value: "trading-db-primary"
+      message_template: "{query_type} {table}"
+
+    # ── Market data feed ────────────────────────────────────────────────
+    - name: market-data-feed
+      type: external_api
+      rate: 300/s
+      error_rate: 0.002
+      availability:
+        uptime: 0.995
+        failure_mode: timeout
+      latency_ms:
+        distribution: percentile
+        p50: 1
+        p95: 5
+        p99: 20
+      outputs: [monitoring]
+      fields:
+        - name: feed
+          generator: weighted_choice
+          values: [equities, options, futures, forex]
+          weights: [40, 25, 20, 15]
+        - name: status
+          generator: weighted_choice
+          values: [streaming, delayed, stale, disconnected]
+          weights: [90, 5, 3, 2]
+      message_template: "Feed {feed}: {status}"

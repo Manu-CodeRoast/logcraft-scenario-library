@@ -1,0 +1,19 @@
+# Minimal API service agent — lightweight microservice.
+agent:
+  name: simple-api
+  type: api_service
+  rate: 50/s
+  error_rate: 0.01
+  message_template: "{action} {resource}: {result}"
+  fields:
+    - name: action
+      generator: weighted_choice
+      values: [create, read, update, delete]
+      weights: [20, 50, 20, 10]
+    - name: resource
+      generator: choice
+      values: [user, order, product, session]
+    - name: result
+      generator: weighted_choice
+      values: [success, not_found, error]
+      weights: [90, 7, 3]

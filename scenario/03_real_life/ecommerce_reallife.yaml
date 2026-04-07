@@ -1,0 +1,261 @@
+scenario:
+  name: e-commerce-reallife
+  seed: 2026
+  duration: 10s
+
+  environment:
+    region: us-east-1
+    cluster: prod-a
+    version: "2.4.1"
+
+  users:
+    count: 500
+    sessions:
+      duration: [30s, 5m]
+      requests_per_session: [3, 40]
+
+  personas:
+    - name: power_user
+      weight: 2.0
+      behavior:
+        request_rate: high
+        endpoints: ["/api/checkout", "/api/search", "/api/bulk-order"]
+    - name: casual_browser
+      weight: 5.0
+      behavior:
+        request_rate: low
+        endpoints: ["/api/products", "/api/categories", "/"]
+    - name: api_integrator
+      weight: 1.0
+      behavior:
+        request_rate: high
+        endpoints: ["/api/v2/orders", "/api/v2/inventory", "/api/v2/webhooks"]
+
+  entity_pool:
+    - "order-10001"
+    - "order-10002"
+    - "order-10003"
+    - "order-10004"
+    - "order-10005"
+    - "customer-201"
+    - "customer-202"
+    - "customer-203"
+    - "product-5001"
+    - "product-5002"
+    - "product-5003"
+
+  field_variations:
+    - field: latency_ms
+      jitter_percent: 8.0
+    - field: response_bytes
+      jitter_percent: 15.0
+
+  noise:
+    log_duplication_rate: 0.002
+    missing_fields_rate: 0.005
+    random_delay_ms: [0, 50]
+
+  log_format:
+    type: json
+    fields:
+      - timestamp
+      - level
+      - user_id
+      - session_id
+      - persona
+      - trace_id
+      - endpoint
+      - method
+      - status_code
+      - latency_ms
+      - response_bytes
+      - order_id
+      - region
+      - cluster
+      - version
+
+  outputs:
+    - type: console
+      format: json
+    - type: file
+      format: json
+      path: logs/ecommerce_reallife.log
+      max_size_bytes: 5242880
+      max_files: 3
+
+  incidents:
+    - name: database_slowdown
+      trigger: "time > 3s"
+      duration: 4s
+      effects:
+        - target: postgres-primary
+          latency_multiplier: 10
+          error_rate: 0.15
+        - target: order-service
+          latency_multiplier: 3
+          error_rate: 0.08
+
+    - name: cache_miss_storm
+      trigger: "time > 6s"
+      duration: 2s
+      effects:
+        - target: redis-cache
+          latency_multiplier: 15
+          error_rate: 0.20
+
+  interactions:
+    - from: nginx-gateway
+      to: order-service
+      type: request
+    - from: order-service
+      to: postgres-primary
+      type: query
+    - from: order-service
+      to: redis-cache
+      type: cache_lookup
+
+  rules:
+    - when: "postgres-primary.latency > 200"
+      propagate:
+        to: order-service
+        latency_multiplier: 2.0
+        error_rate: 0.10
+
+  agents:
+    # ── Gateway ────────────────────────────────────────────────────
+    - name: nginx-gateway
+      type: web_server
+      rate: 150/s
+      error_rate: 0.005
+      log_level: info
+      latency_ms:
+        distribution: percentile
+        p50: 8
+        p95: 25
+        p99: 80
+      message_template: "{method} {endpoint} -> {status_code} ({latency_ms}ms)"
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: ["GET", "POST", "PUT", "DELETE"]
+          weights: [70, 15, 10, 5]
+        - name: endpoint
+          generator: choice
+          values: ["/api/products", "/api/checkout", "/api/search", "/api/categories"]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "301", "400", "404", "500"]
+          weights: [80, 5, 3, 5, 5, 2]
+        - name: response_bytes
+          generator: range
+          min: 200
+          max: 15000
+          integer: true
+        - name: order_id
+          generator: sequence
+          prefix: "req-"
+          start: 1
+      request_flow:
+        - call: order-service
+          timeout_ms: 5000
+
+    # ── Order Service ──────────────────────────────────────────────
+    - name: order-service
+      type: microservice
+      rate: 100/s
+      error_rate: 0.008
+      log_level: info
+      latency_ms:
+        distribution: normal
+        mean: 25
+        stddev: 10
+      message_template: "Processing {method} {endpoint}"
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: ["GET", "POST", "PUT"]
+          weights: [50, 30, 20]
+        - name: endpoint
+          generator: choice
+          values: ["/orders", "/orders/create", "/orders/status"]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "400", "500"]
+          weights: [75, 10, 10, 5]
+        - name: order_id
+          generator: sequence
+          prefix: "ORD-"
+          start: 1000
+      state:
+        connection_pool:
+          initial: 0.0
+          max: 1.0
+          growth_per_request: 0.001
+      effects:
+        - when: "connection_pool > 0.8"
+          latency_multiplier: 3
+          error_rate: 0.15
+      health_state:
+        latency_multipliers: [1.0, 1.8, 4.0, 1.3]
+        error_rates: [0.0, 0.03, 0.20, 0.01]
+        transitions:
+          - { from: 0, to: 1, probability: 0.005 }
+          - { from: 1, to: 2, probability: 0.02 }
+          - { from: 2, to: 3, probability: 0.05 }
+          - { from: 3, to: 0, probability: 0.10 }
+
+    # ── PostgreSQL ─────────────────────────────────────────────────
+    - name: postgres-primary
+      type: database
+      rate: 80/s
+      error_rate: 0.003
+      log_level: info
+      latency_ms: [2, 50]
+      message_template: "Query: {query_type} on {table}"
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: ["SELECT", "INSERT", "UPDATE", "DELETE"]
+          weights: [60, 20, 15, 5]
+        - name: table
+          generator: choice
+          values: ["orders", "users", "products", "inventory", "payments"]
+        - name: rows_affected
+          generator: range
+          min: 0
+          max: 500
+          integer: true
+        - name: order_id
+          generator: sequence
+          prefix: "txn-"
+          start: 5000
+      contention:
+        max_connections: 100
+        queue_latency_ms: [0, 20]
+      slow_queries:
+        probability: 0.02
+        latency_ms: [500, 3000]
+
+    # ── Redis Cache ────────────────────────────────────────────────
+    - name: redis-cache
+      type: cache
+      rate: 200/s
+      error_rate: 0.001
+      log_level: info
+      latency_ms: [0.5, 5]
+      message_template: "{operation} {cache_key}"
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: ["GET", "SET", "DEL", "MGET"]
+          weights: [60, 25, 10, 5]
+        - name: cache_key
+          generator: choice
+          values: ["user:session:", "product:detail:", "order:status:", "inventory:count:"]
+        - name: hit_miss
+          generator: weighted_choice
+          values: ["HIT", "MISS"]
+          weights: [85, 15]
+      availability:
+        uptime: 0.998
+        failure_mode: timeout

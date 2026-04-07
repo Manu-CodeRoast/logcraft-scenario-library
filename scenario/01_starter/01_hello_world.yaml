@@ -1,0 +1,31 @@
+# Starter 01 — Hello World
+# The simplest possible scenario: one agent, one output, slow enough to read.
+# Concepts: agent, rate, fields, weighted_choice, choice
+scenario:
+  name: hello-logcraft
+  seed: 42
+  duration: 2m
+
+  outputs:
+    - name: log-aggregator
+      type: http
+      url: http://ingest.logcraft.demo/v1/logs
+      format: json
+
+  agents:
+    - name: app
+      type: web_server
+      rate: 2/s
+      message_template: "{method} {path} -> {status_code}"
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST]
+          weights: [80, 20]
+        - name: path
+          generator: choice
+          values: [/api/users, /health]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "500"]
+          weights: [95, 5]

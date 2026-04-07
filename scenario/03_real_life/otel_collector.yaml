@@ -1,0 +1,184 @@
+# Real-life: OpenTelemetry Collector pipeline.
+# Generates OTEL-formatted logs suitable for OTLP ingest endpoints.
+# Models a microservices platform sending traces+logs to an OTEL collector.
+scenario:
+  name: otel-collector-pipeline
+  seed: 8888
+  duration: 10m
+
+  environment:
+    region: ap-southeast-1
+    cluster: prod-asia
+    version: v2.3.0
+
+  noise:
+    log_duplication_rate: 0.001
+    missing_fields_rate: 0.002
+    random_delay_ms: [0, 5]
+
+  templates:
+    rust_service:
+      rate: 150/s
+      error_rate: 0.003
+      latency_ms:
+        distribution: percentile
+        p50: 3
+        p95: 15
+        p99: 50
+
+  # ── Outputs: OTEL format for collector, console for debugging ────────
+  outputs:
+    - name: otel_collector
+      type: file
+      format: otel
+      path: logs/otel-collector.ndjson
+      max_size_bytes: 52428800
+      max_files: 5
+    - name: debug
+      type: console
+      format: json
+
+  incidents:
+    - name: network_partition
+      trigger: "time > 5m"
+      duration: 90s
+      effects:
+        - target: api-gateway
+          error_rate: 0.12
+          latency_multiplier: 8
+        - target: user-service
+          error_rate: 0.08
+
+  interactions:
+    - from: api-gateway
+      to: user-service
+      type: request
+    - from: api-gateway
+      to: catalog-service
+      type: request
+    - from: user-service
+      to: session-store
+      type: dependency
+    - from: catalog-service
+      to: search-index
+      type: dependency
+
+  auto_cascade:
+    error_threshold: 0.05
+    dampening_factor: 0.5
+    blast_radius: 3
+
+  agents:
+    # ── API Gateway ─────────────────────────────────────────────────────
+    - name: api-gateway
+      type: api_service
+      use: rust_service
+      rate: 300/s
+      instances: 3
+      outputs: [otel_collector, debug]
+      dependencies: [user-service, catalog-service]
+      request_flow:
+        - call: user-service
+          timeout_ms: 30
+          network_latency_ms: 2.0
+          network_jitter_ms: 0.5
+        - call: catalog-service
+          timeout_ms: 50
+          network_latency_ms: 2.0
+          network_jitter_ms: 0.5
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT, DELETE]
+          weights: [55, 25, 12, 8]
+        - name: path
+          generator: weighted_choice
+          values: [/api/users, /api/catalog, /api/orders, /health]
+          weights: [30, 30, 25, 15]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "400", "404", "500"]
+          weights: [72, 10, 6, 6, 6]
+      message_template: "{method} {path} -> {status_code}"
+
+    # ── User service ────────────────────────────────────────────────────
+    - name: user-service
+      type: api_service
+      use: rust_service
+      rate: 100/s
+      outputs: [otel_collector]
+      dependencies: [session-store]
+      fields:
+        - name: action
+          generator: weighted_choice
+          values: [get_profile, update_profile, authenticate, list_users]
+          weights: [40, 15, 30, 15]
+        - name: result
+          generator: weighted_choice
+          values: [ok, not_found, unauthorized, error]
+          weights: [82, 8, 7, 3]
+      message_template: "{action}: {result}"
+
+    # ── Catalog service ─────────────────────────────────────────────────
+    - name: catalog-service
+      type: api_service
+      use: rust_service
+      rate: 120/s
+      outputs: [otel_collector]
+      dependencies: [search-index]
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: [search, get_product, list_category, get_recommendations]
+          weights: [35, 30, 20, 15]
+        - name: result_count
+          generator: range
+          min: 0
+          max: 500
+          integer: true
+      message_template: "{operation}: {result_count} results"
+
+    # ── Session store (Redis) ───────────────────────────────────────────
+    - name: session-store
+      type: cache
+      rate: 400/s
+      error_rate: 0.001
+      latency_ms:
+        distribution: percentile
+        p50: 0.3
+        p95: 1
+        p99: 3
+      outputs: [otel_collector]
+      fields:
+        - name: command
+          generator: weighted_choice
+          values: [GET, SET, EXPIRE, DEL]
+          weights: [45, 30, 15, 10]
+        - name: result
+          generator: weighted_choice
+          values: [hit, miss, ok]
+          weights: [55, 35, 10]
+      message_template: "{command} session -> {result}"
+
+    # ── Search index (ES) ──────────────────────────────────────────────
+    - name: search-index
+      type: search_engine
+      rate: 80/s
+      error_rate: 0.005
+      latency_ms:
+        distribution: percentile
+        p50: 8
+        p95: 50
+        p99: 200
+      outputs: [otel_collector]
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: [full_text, filtered, aggregation, suggest]
+          weights: [40, 25, 20, 15]
+        - name: hits
+          generator: range
+          min: 0
+          max: 1000
+          integer: true
+      message_template: "{query_type} query: {hits} hits"

@@ -1,0 +1,103 @@
+# This scenario demonstrates the registry feature.
+# Agent definitions live in external YAML files under data/agents/.
+# The registry maps logical names (with optional versions) to those files.
+# Agents are instantiated via "ref:" with optional name and overrides.
+
+scenario:
+  name: "prod-simulation"
+  seed: 42
+  duration: 10m
+
+  environment:
+    region: eu-west-1
+    cluster: prod-cluster-a
+    version: v1.4.2
+
+  noise:
+    log_duplication_rate: 0.005
+    missing_fields_rate: 0.002
+    random_delay_ms: [0, 10]
+
+  # ── Agent Registry ────────────────────────────────────────────────
+  # Define where agent files live (sources) and name them.
+  # Version support: "nginx: { v1: path, v2: path }" → ref as "nginx:v1"
+  # Simple mapping: "auth: path" → ref as "auth"
+  registry:
+    sources:
+      - "./agents/"
+
+    nginx:
+      v1: ../agents/nginx_v1.yaml
+      v2: ../agents/nginx_v2.yaml
+    auth: ../agents/auth.yaml
+    db: ../agents/db.yaml
+
+    agents:
+      # Two nginx instances running different versions
+      - ref: "nginx:v2"
+        name: nginx-eu-1
+
+      - ref: "nginx:v1"
+        name: nginx-eu-2
+
+      # Scaled auth service (3 instances)
+      - ref: auth
+        name: auth-service
+        overrides:
+          instances: 3
+
+      # Database with production traffic rate
+      - ref: db
+        name: postgres-main
+
+      # Hot nginx instance under stress test
+      - ref: "nginx:v1"
+        name: nginx-hot
+        overrides:
+          rate_per_second: 500
+          error_rate: 0.1
+
+  # Inline agents can coexist with registry agents
+  agents:
+    - name: redis-cache
+      type: database
+      rate_per_second: 1000
+      error_rate: 0.001
+      latency_ms:
+        distribution: percentile
+        p50: 0.5
+        p95: 2
+        p99: 5
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: ["GET", "SET", "DEL", "MGET"]
+          weights: [50, 30, 10, 10]
+        - name: key_prefix
+          generator: choice
+          values: ["session:", "cache:", "rate_limit:"]
+      message_template: "{operation} {key_prefix}*"
+
+  interactions:
+    - from: nginx-eu-1
+      to: auth-service
+      type: request
+    - from: nginx-eu-1
+      to: postgres-main
+      type: dependency
+    - from: auth-service
+      to: redis-cache
+      type: dependency
+
+  incidents:
+    - name: connection_pool_exhaustion
+      trigger: "time > 6m"
+      effects:
+        - target: postgres-main
+          latency_multiplier: 5
+        - target: nginx-eu-1
+          error_rate: 0.15
+
+  outputs:
+    - type: console
+      format: json

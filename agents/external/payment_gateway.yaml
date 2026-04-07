@@ -1,0 +1,43 @@
+# Payment gateway agent — external API with availability modeling.
+agent:
+  name: payment-gateway
+  type: external_api
+  rate: 50/s
+  error_rate: 0.008
+  availability:
+    uptime: 0.985
+    failure_mode: timeout
+  failures:
+    mode: burst
+    trigger: latency_threshold
+    threshold_ms: 500
+    duration: 30s
+    error_rate: 0.20
+  latency_ms:
+    distribution: percentile
+    p50: 80
+    p95: 300
+    p99: 800
+  message_template: "Payment {operation}: {provider} - {result} ({currency} {amount})"
+  fields:
+    - name: operation
+      generator: weighted_choice
+      values: [charge, refund, authorize, capture, void]
+      weights: [50, 15, 20, 10, 5]
+    - name: provider
+      generator: weighted_choice
+      values: [stripe, paypal, adyen, square]
+      weights: [40, 25, 25, 10]
+    - name: result
+      generator: weighted_choice
+      values: [approved, declined, timeout, fraud_check, pending]
+      weights: [75, 10, 5, 5, 5]
+    - name: currency
+      generator: weighted_choice
+      values: [USD, EUR, GBP, JPY]
+      weights: [50, 30, 10, 10]
+    - name: amount
+      generator: range
+      min: 1
+      max: 5000
+      integer: true

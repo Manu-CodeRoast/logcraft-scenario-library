@@ -1,0 +1,53 @@
+agent:
+  name: nginx
+  type: web_server
+  rate_per_second: 200
+  error_rate: 0.01
+  message_template: "{method} {path} -> {status_code} ({response_time_ms}ms)"
+  latency_ms:
+    distribution: percentile
+    p50: 15
+    p95: 80
+    p99: 250
+  phases:
+    - name: warmup
+      duration: 1m
+      rate: 50/s
+      latency_ms: [5, 20]
+    - name: steady
+      duration: 5m
+      rate: 200/s
+      latency_ms:
+        distribution: normal
+        mean: 25
+        stddev: 8
+    - name: peak
+      duration: 3m
+      rate: 400/s
+      error_rate: 0.03
+      latency_ms:
+        distribution: percentile
+        p50: 30
+        p95: 150
+        p99: 500
+  fields:
+    - name: method
+      generator: weighted_choice
+      values: ["GET", "POST", "PUT", "DELETE", "PATCH"]
+      weights: [55, 20, 10, 5, 10]
+    - name: path
+      generator: weighted_choice
+      values: ["/api/v2/users", "/api/v2/orders", "/api/v2/products", "/api/v2/search", "/health"]
+      weights: [25, 25, 20, 20, 10]
+    - name: status_code
+      generator: weighted_choice
+      values: ["200", "201", "400", "404", "429", "500", "503"]
+      weights: [70, 8, 5, 5, 4, 5, 3]
+    - name: response_time_ms
+      generator: range
+      min: 1
+      max: 500
+      integer: true
+    - name: request_id
+      generator: sequence
+      prefix: "req-"

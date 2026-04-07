@@ -1,0 +1,106 @@
+# Demo: Registry and templates — shows inheritance, versioning, overrides.
+# External agents from data/agents/ are loaded via the registry mechanism.
+scenario:
+  name: registry-templates-demo
+  seed: 99
+  duration: 3m
+
+  environment:
+    region: eu-central-1
+    cluster: staging
+    version: v1.0.0-beta
+
+  # ── Templates: reusable presets ───────────────────────────────────────
+  templates:
+    high_traffic_api:
+      rate: 200/s
+      error_rate: 0.01
+      latency_ms:
+        distribution: percentile
+        p50: 10
+        p95: 50
+        p99: 150
+
+    background_worker:
+      rate: 30/s
+      error_rate: 0.005
+      latency_ms:
+        distribution: normal
+        mean: 200
+        stddev: 80
+
+  # ── Registry: versioned external agents ───────────────────────────────
+  registry:
+    sources:
+      - "../agents/"
+    nginx:
+      v1: ../agents/nginx_v1.yaml
+      v2: ../agents/nginx_v2.yaml
+    auth: ../agents/auth.yaml
+    db: ../agents/db.yaml
+
+    agents:
+      # Load nginx v2 with custom name
+      - ref: "nginx:v2"
+        name: nginx-primary
+      # Load nginx v1 as a legacy backup
+      - ref: "nginx:v1"
+        name: nginx-legacy
+        overrides:
+          rate_per_second: 30
+      # Scaled auth service
+      - ref: auth
+        name: auth-cluster
+        overrides:
+          instances: 3
+      # Override database rate for staging
+      - ref: db
+        name: staging-db
+        overrides:
+          rate_per_second: 100
+
+  outputs:
+    - type: console
+      format: json
+
+  # ── Inline agents that use templates ──────────────────────────────────
+  agents:
+    - name: order-processor
+      type: api_service
+      use: high_traffic_api
+      rate: 150/s
+      fields:
+        - name: action
+          generator: weighted_choice
+          values: [create_order, update_order, cancel_order, refund]
+          weights: [40, 30, 20, 10]
+        - name: status
+          generator: weighted_choice
+          values: [success, failed, pending]
+          weights: [80, 10, 10]
+      message_template: "{action}: {status}"
+
+    - name: report-generator
+      type: worker
+      use: background_worker
+      fields:
+        - name: report_type
+          generator: choice
+          values: [daily_sales, inventory, user_activity, compliance]
+        - name: duration_ms
+          generator: range
+          min: 500
+          max: 30000
+          integer: true
+      message_template: "Generate {report_type} report ({duration_ms}ms)"
+
+  interactions:
+    - from: nginx-primary
+      to: order-processor
+      type: request
+    - from: nginx-primary
+      to: auth-cluster
+      type: request
+    - from: order-processor
+      to: staging-db
+      type: dependency

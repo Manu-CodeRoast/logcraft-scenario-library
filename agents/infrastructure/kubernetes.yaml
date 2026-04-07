@@ -1,0 +1,30 @@
+# Kubernetes / container orchestrator agent — models kubelet/scheduler logs.
+agent:
+  name: k8s-controller
+  type: orchestrator
+  rate: 30/s
+  error_rate: 0.01
+  message_template: "{event_type} {resource_kind}/{resource_name} in {namespace}: {reason}"
+  fields:
+    - name: event_type
+      generator: weighted_choice
+      values: [Normal, Warning]
+      weights: [85, 15]
+    - name: resource_kind
+      generator: weighted_choice
+      values: [Pod, Deployment, Service, ReplicaSet, ConfigMap, Node]
+      weights: [40, 20, 15, 10, 10, 5]
+    - name: resource_name
+      generator: choice
+      values: [api-gateway-7d8f9, order-svc-4b2c1, redis-cache-0, pg-primary-0, worker-6a3e2]
+    - name: namespace
+      generator: weighted_choice
+      values: [production, staging, monitoring, kube-system]
+      weights: [50, 25, 15, 10]
+    - name: reason
+      generator: weighted_choice
+      values: [Scheduled, Pulling, Pulled, Created, Started, Unhealthy, BackOff, FailedMount, OOMKilled]
+      weights: [15, 10, 15, 15, 15, 10, 10, 5, 5]
+    - name: node
+      generator: choice
+      values: [node-01, node-02, node-03, node-04]

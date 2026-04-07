@@ -1,0 +1,41 @@
+# PostgreSQL database agent with contention and slow queries.
+agent:
+  name: postgres
+  type: database
+  rate: 300/s
+  error_rate: 0.005
+  contention:
+    max_connections: 200
+    queue_latency_ms: [1, 50]
+  slow_queries:
+    probability: 0.02
+    latency_ms: [500, 5000]
+  latency_ms:
+    distribution: percentile
+    p50: 3
+    p95: 15
+    p99: 50
+  message_template: "{query_type} {table_name}: {rows_affected} rows ({duration_ms}ms)"
+  fields:
+    - name: query_type
+      generator: weighted_choice
+      values: [SELECT, INSERT, UPDATE, DELETE, COPY, VACUUM]
+      weights: [50, 20, 15, 5, 5, 5]
+    - name: table_name
+      generator: weighted_choice
+      values: [users, orders, products, sessions, audit_log, inventory]
+      weights: [25, 25, 20, 15, 10, 5]
+    - name: rows_affected
+      generator: range
+      min: 0
+      max: 10000
+      integer: true
+    - name: duration_ms
+      generator: percentile
+      p50: 3
+      p95: 50
+      p99: 200
+    - name: connection_id
+      generator: sequence
+      prefix: "conn-"
+      start: 1

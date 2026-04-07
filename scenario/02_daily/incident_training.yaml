@@ -1,0 +1,282 @@
+# Daily runner: Incident-heavy day — cascading failures throughout the day.
+# Designed for training SOC/SRE teams on incident response patterns.
+scenario:
+  name: incident-training-day
+  seed: 911
+  duration: 8h
+
+  environment:
+    region: us-west-2
+    cluster: prod-west
+    version: v4.2.1
+
+  noise:
+    log_duplication_rate: 0.004
+    missing_fields_rate: 0.002
+    random_delay_ms: [0, 12]
+
+  templates:
+    standard_service:
+      rate: 80/s
+      error_rate: 0.005
+      latency_ms:
+        distribution: percentile
+        p50: 15
+        p95: 60
+        p99: 250
+
+  outputs:
+    - name: siem
+      type: file
+      format: json
+      path: logs/incident-training/siem.ndjson
+      max_size_bytes: 209715200
+      max_files: 5
+    - name: metrics
+      type: statsd
+      host: 127.0.0.1
+      port: 8125
+      metrics_prefix: logcraft.incident
+      metrics_interval_seconds: 15
+    - name: console
+      type: console
+      format: text
+
+  # ── 6 incidents throughout the day ────────────────────────────────────
+  incidents:
+    # 1. Morning: Slow DNS resolution
+    - name: dns_degradation
+      trigger: "time > 30m"
+      duration: 20m
+      effects:
+        - target: api-gateway
+          latency_multiplier: 4
+        - target: payment-api
+          latency_multiplier: 3
+
+    # 2. Mid-morning: Certificate expiry on payment provider
+    - name: payment_cert_expiry
+      trigger: "time > 1h30m"
+      duration: 45m
+      effects:
+        - target: payment-api
+          error_rate: 0.40
+          latency_multiplier: 10
+
+    # 3. Lunch: Memory leak causes OOM in order service
+    - name: order_service_oom
+      trigger: "time > 3h"
+      duration: 15m
+      effects:
+        - target: order-service
+          error_rate: 0.60
+          latency_multiplier: 20
+
+    # 4. Afternoon: Database connection pool exhaustion
+    - name: db_pool_exhaustion
+      trigger: "time > 4h30m"
+      duration: 30m
+      effects:
+        - target: database
+          latency_multiplier: 15
+          error_rate: 0.25
+        - target: order-service
+          latency_multiplier: 5
+          error_rate: 0.15
+        - target: api-gateway
+          error_rate: 0.10
+
+    # 5. Late afternoon: Network partition between services
+    - name: network_partition
+      trigger: "time > 6h"
+      duration: 20m
+      effects:
+        - target: api-gateway
+          error_rate: 0.20
+        - target: order-service
+          error_rate: 0.25
+        - target: notification-svc
+          error_rate: 0.30
+
+    # 6. Evening: Cascading failure from external API
+    - name: vendor_api_outage
+      trigger: "time > 7h"
+      effects:
+        - target: payment-api
+          error_rate: 0.50
+          latency_multiplier: 30
+
+  interactions:
+    - from: api-gateway
+      to: order-service
+      type: request
+    - from: api-gateway
+      to: payment-api
+      type: request
+    - from: order-service
+      to: database
+      type: dependency
+    - from: order-service
+      to: notification-svc
+      type: request
+    - from: payment-api
+      to: database
+      type: dependency
+
+  rules:
+    - when: "database.error_rate > 0.05"
+      propagate:
+        to: order-service
+        latency_multiplier: 4.0
+        error_rate: 0.10
+    - when: "order-service.error_rate > 0.10"
+      propagate:
+        to: api-gateway
+        error_rate: 0.08
+    - when: "payment-api.error_rate > 0.15"
+      propagate:
+        to: api-gateway
+        latency_multiplier: 2.0
+        error_rate: 0.05
+
+  auto_cascade:
+    error_threshold: 0.08
+    dampening_factor: 0.6
+    blast_radius: 3
+
+  agents:
+    - name: api-gateway
+      type: api_service
+      use: standard_service
+      rate: 200/s
+      instances: 3
+      outputs: [siem, metrics, console]
+      dependencies: [order-service, payment-api]
+      rate_modulation:
+        type: business_hours
+        peak_multiplier: 1.0
+        off_peak_multiplier: 0.2
+        peak_start_hour: 8
+        peak_end_hour: 20
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT, DELETE]
+          weights: [50, 25, 15, 10]
+        - name: path
+          generator: weighted_choice
+          values: [/api/orders, /api/payments, /api/users, /health]
+          weights: [30, 25, 30, 15]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "400", "404", "500", "503"]
+          weights: [68, 10, 5, 5, 7, 5]
+      message_template: "{method} {path} -> {status_code}"
+
+    - name: order-service
+      type: api_service
+      use: standard_service
+      rate: 60/s
+      instances: 2
+      outputs: [siem, metrics]
+      dependencies: [database, notification-svc]
+      health_state:
+        latency_multipliers: [1.0, 2.5, 8.0, 2.0]
+        error_rates: [0.005, 0.04, 0.25, 0.02]
+        transitions:
+          - { from: 0, to: 1, probability: 0.003 }
+          - { from: 1, to: 2, probability: 0.02 }
+          - { from: 2, to: 3, probability: 0.06 }
+          - { from: 3, to: 0, probability: 0.10 }
+      fields:
+        - name: action
+          generator: weighted_choice
+          values: [create, process, ship, cancel, refund]
+          weights: [30, 25, 20, 15, 10]
+        - name: result
+          generator: weighted_choice
+          values: [success, failed, timeout, validation_error]
+          weights: [78, 10, 7, 5]
+      message_template: "Order {action}: {result}"
+
+    - name: payment-api
+      type: external_api
+      rate: 40/s
+      error_rate: 0.008
+      outputs: [siem, metrics]
+      availability:
+        uptime: 0.990
+        failure_mode: timeout
+      failures:
+        mode: burst
+        trigger: latency_threshold
+        threshold_ms: 500
+        duration: 30s
+        error_rate: 0.15
+      latency_ms:
+        distribution: percentile
+        p50: 80
+        p95: 300
+        p99: 800
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: [charge, authorize, capture, refund]
+          weights: [45, 25, 20, 10]
+        - name: result
+          generator: weighted_choice
+          values: [approved, declined, timeout, error]
+          weights: [75, 12, 8, 5]
+      message_template: "Payment {operation}: {result}"
+
+    - name: database
+      type: database
+      rate: 150/s
+      error_rate: 0.003
+      outputs: [siem, metrics]
+      contention:
+        max_connections: 150
+        queue_latency_ms: [1, 40]
+      slow_queries:
+        probability: 0.02
+        latency_ms: [500, 5000]
+      state:
+        connection_count:
+          initial: 30
+          max: 150
+          growth_per_request: 0.006
+      effects:
+        - when: "connection_count > 120"
+          latency_multiplier: 3
+        - when: "connection_count > 145"
+          error_rate: 0.12
+      latency_ms:
+        distribution: percentile
+        p50: 3
+        p95: 20
+        p99: 80
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: [SELECT, INSERT, UPDATE, DELETE]
+          weights: [50, 25, 15, 10]
+        - name: table
+          generator: choice
+          values: [orders, payments, users, audit_log]
+      message_template: "{query_type} {table}"
+
+    - name: notification-svc
+      type: api_service
+      use: standard_service
+      rate: 20/s
+      outputs: [siem]
+      fields:
+        - name: channel
+          generator: weighted_choice
+          values: [email, sms, push, webhook]
+          weights: [40, 25, 20, 15]
+        - name: status
+          generator: weighted_choice
+          values: [sent, queued, failed, bounced]
+          weights: [70, 15, 10, 5]
+      message_template: "Notify via {channel}: {status}"

@@ -1,0 +1,37 @@
+# Load balancer (HAProxy/Envoy style) agent.
+agent:
+  name: load-balancer
+  type: proxy
+  rate: 500/s
+  error_rate: 0.005
+  latency_ms:
+    distribution: percentile
+    p50: 2
+    p95: 10
+    p99: 50
+  message_template: "{method} {path} -> backend:{backend} {status_code} ({response_bytes}B)"
+  fields:
+    - name: method
+      generator: weighted_choice
+      values: [GET, POST, PUT, DELETE, PATCH, OPTIONS]
+      weights: [50, 25, 10, 5, 5, 5]
+    - name: path
+      generator: weighted_choice
+      values: [/api/v1/users, /api/v1/orders, /api/v1/products, /health, /metrics, /api/v1/search]
+      weights: [25, 20, 20, 15, 10, 10]
+    - name: backend
+      generator: weighted_choice
+      values: [web-1, web-2, web-3, web-4]
+      weights: [25, 25, 25, 25]
+    - name: status_code
+      generator: weighted_choice
+      values: ["200", "201", "301", "400", "404", "500", "502", "503"]
+      weights: [65, 8, 3, 5, 5, 5, 5, 4]
+    - name: response_bytes
+      generator: range
+      min: 200
+      max: 50000
+      integer: true
+    - name: client_ip
+      generator: choice
+      values: ["10.0.1.15", "10.0.1.22", "10.0.2.8", "192.168.1.100", "172.16.0.50"]

@@ -1,0 +1,66 @@
+# Starter 03 — Custom Fields
+# Shows all field generator types in a single scenario.
+# Concepts: weighted_choice, choice, range, sequence, static, normal
+scenario:
+  name: custom-fields
+  seed: 42
+  duration: 2m
+
+  outputs:
+    - name: log-aggregator
+      type: http
+      url: http://ingest.logcraft.demo/v1/logs
+      format: json
+
+  agents:
+    - name: api-gateway
+      type: web_server
+      rate: 3/s
+      error_rate: 0.02
+      message_template: "{method} {path} -> {status_code} ({response_time_ms}ms)"
+      fields:
+        # weighted_choice — pick with weighted probability
+        - name: method
+          generator: weighted_choice
+          values: ["GET", "POST", "PUT", "DELETE"]
+          weights: [60, 25, 10, 5]
+
+        # choice — pick with equal probability
+        - name: path
+          generator: choice
+          values: [/api/products, /api/orders, /api/users, /health]
+
+        # weighted_choice — realistic status distribution
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "404", "500"]
+          weights: [80, 10, 7, 3]
+
+        # normal — Gaussian distribution for latency
+        - name: response_time_ms
+          generator: normal
+          mean: 35
+          stddev: 12
+
+        # sequence — auto-incrementing ID with prefix
+        - name: request_id
+          generator: sequence
+          prefix: "req-"
+          start: 1000
+
+        # range — random integer in a range
+        - name: bytes_sent
+          generator: range
+          min: 200
+          max: 50000
+          integer: true
+
+        # static — fixed value
+        - name: host
+          generator: static
+          value: "web-prod-01"
+
+        # choice — simulates different user agents
+        - name: user_agent
+          generator: choice
+          values: ["Mozilla/5.0 Chrome/120", "curl/8.4.0", "Python-requests/2.31"]

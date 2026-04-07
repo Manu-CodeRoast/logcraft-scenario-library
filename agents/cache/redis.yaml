@@ -1,0 +1,30 @@
+# Redis cache agent — models an in-memory cache/store.
+agent:
+  name: redis-cache
+  type: cache
+  rate: 1000/s
+  error_rate: 0.001
+  latency_ms:
+    distribution: percentile
+    p50: 0.5
+    p95: 2
+    p99: 5
+  message_template: "{command} {key_prefix}* -> {result}"
+  fields:
+    - name: command
+      generator: weighted_choice
+      values: [GET, SET, DEL, MGET, HGET, HSET, EXPIRE, INCR]
+      weights: [35, 25, 5, 10, 8, 7, 5, 5]
+    - name: key_prefix
+      generator: weighted_choice
+      values: ["session:", "cache:", "rate_limit:", "lock:", "queue:"]
+      weights: [30, 30, 15, 15, 10]
+    - name: result
+      generator: weighted_choice
+      values: [hit, miss, ok, error]
+      weights: [60, 25, 12, 3]
+    - name: db_index
+      generator: range
+      min: 0
+      max: 3
+      integer: true

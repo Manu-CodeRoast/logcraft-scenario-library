@@ -1,0 +1,36 @@
+# RabbitMQ agent — models AMQP message broker.
+agent:
+  name: rabbitmq
+  type: message_queue
+  rate: 300/s
+  error_rate: 0.003
+  latency_ms:
+    distribution: percentile
+    p50: 2
+    p95: 10
+    p99: 30
+  message_template: "{operation} {exchange}/{routing_key}: {status}"
+  fields:
+    - name: operation
+      generator: weighted_choice
+      values: [publish, consume, ack, nack, reject]
+      weights: [35, 30, 20, 10, 5]
+    - name: exchange
+      generator: weighted_choice
+      values: [orders.topic, events.fanout, notifications.direct, dlx.headers]
+      weights: [40, 25, 25, 10]
+    - name: routing_key
+      generator: choice
+      values: [order.created, order.shipped, user.signup, payment.completed, alert.critical]
+    - name: queue
+      generator: choice
+      values: [order-processor, notification-sender, audit-logger, retry-handler]
+    - name: status
+      generator: weighted_choice
+      values: [delivered, requeued, dead-lettered, rejected]
+      weights: [85, 8, 5, 2]
+    - name: message_size_bytes
+      generator: range
+      min: 64
+      max: 65536
+      integer: true
