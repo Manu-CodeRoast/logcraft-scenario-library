@@ -1,0 +1,259 @@
+# Real-Life 14 — Silent Partial Failure (Instance Freeze)
+#
+# ── What this scenario exercises ──────────────────────────────────────────────
+#
+# A 4-instance worker pool (worker-01 through worker-04) processing jobs
+# from a shared queue. At 30 minutes, worker-04 silently freezes — the
+# process is still running (no crash, no OOM) but stops producing log
+# output. The remaining 3 workers continue normally.
+#
+# From the aggregate log stream perspective:
+#   0 – 30 min:  4 workers × 15/s = 60 events/second total
+#  30 – 90 min:  3 workers × 15/s = 45 events/second total  (−25%)
+#
+# Template distribution is unchanged: worker-01/02/03 continue to emit
+# exactly the same log templates in the same proportions as before.
+# Only the absolute volume changes.
+#
+# ── InSight detection blind spot ─────────────────────────────────────────────
+#
+# VOLUME DILUTION — ALL DETECTORS ARE DISTRIBUTIONAL, NOT VOLUMETRIC
+#
+# Every InSight detector operates on relative structure, not absolute count:
+#
+#   Spike:          count >= threshold. Volume DECREASES → Spike cannot fire.
+#
+#   Drift (PH/CUSUM): observes js_divergence between successive MetaLog docs.
+#                   JSD measures the divergence of the TEMPLATE FREQUENCY
+#                   DISTRIBUTION. With 3 identical workers still running,
+#                   the distribution is identical to before — same templates,
+#                   same proportions. JSD ≈ 0.  No alarm.
+#
+#   VanishedTemplate: fires when a template present in the baseline is absent
+#                   in the current window. Worker-04's templates are NOT
+#                   unique — workers 01/02/03 emit the same templates.
+#                   No template vanishes.  Does not fire.
+#
+#   NoveltyNGram:   nothing new appears. Does not fire.
+#
+#   BranchingShift: conditional routing entropy is unchanged — same job types,
+#                   same outcomes, same proportions. Does not fire.
+#
+#   FieldDrift:     parameter distributions (job_type, duration_ms, outcome)
+#                   are identical. JSD ≈ 0.  Does not fire.
+#
+# Result: a 25% reduction in log volume from a frozen production instance
+# is completely invisible to InSight for the entire 60-minute freeze.
+# Only a human watching a dashboard would notice the rate drop.
+#
+# What InSight DOES catch in this scenario:
+#   • Nothing. Zero detections for the 60-minute freeze window.
+#   • If worker-04 had unique templates (e.g., "worker-04 heartbeat"),
+#     VanishedTemplate would fire at scale 0 (confidence=0.5) —
+#     but homogeneous worker pools don't have per-instance templates.
+#
+# Required for reliable detection of volume drops:
+#   • An absolute volume monitor: "expected count in [N ± σ] per window;
+#     fire if count < N - 3σ." This is outside InSight's current scope.
+#   • Or: per-instance log routing (separate InSight pipeline per worker)
+#     so each instance's silence is observable in isolation.
+#   • Or: explicit heartbeat template that each instance emits uniquely
+#     (e.g., "worker-04 alive interval=30s"), enabling VanishedTemplate.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+scenario:
+  name: "silent-partial-failure-instance-freeze"
+  seed: 42
+  duration: 90m
+
+  environment:
+    region: us-west-2
+    cluster: prod-batch
+    queue: job-processing-queue
+    version: v1.8.4
+
+  agents:
+    # ── Worker-01 through Worker-03 — stable throughout ───────────────────
+    - name: worker-01
+      type: background_worker
+      rate: 15/s
+      error_rate: 0.005
+      fields:
+        - name: job_type
+          generator: weighted_choice
+          values: ["encode_video", "resize_image", "generate_thumbnail", "transcode_audio"]
+          weights: [35, 30, 25, 10]
+        - name: job_id
+          generator: sequence
+          prefix: "JOB-"
+          start: 10000
+        - name: duration_ms
+          generator: range
+          min: 50
+          max: 8000
+          integer: true
+        - name: outcome
+          generator: weighted_choice
+          values: ["success", "retry", "failed"]
+          weights: [94, 4, 2]
+      message_template: "worker=01 {job_type} job={job_id} duration={duration_ms}ms -> {outcome}"
+
+    - name: worker-02
+      type: background_worker
+      rate: 15/s
+      error_rate: 0.005
+      fields:
+        - name: job_type
+          generator: weighted_choice
+          values: ["encode_video", "resize_image", "generate_thumbnail", "transcode_audio"]
+          weights: [35, 30, 25, 10]
+        - name: job_id
+          generator: sequence
+          prefix: "JOB-"
+          start: 20000
+        - name: duration_ms
+          generator: range
+          min: 50
+          max: 8000
+          integer: true
+        - name: outcome
+          generator: weighted_choice
+          values: ["success", "retry", "failed"]
+          weights: [94, 4, 2]
+      message_template: "worker=02 {job_type} job={job_id} duration={duration_ms}ms -> {outcome}"
+
+    - name: worker-03
+      type: background_worker
+      rate: 15/s
+      error_rate: 0.005
+      fields:
+        - name: job_type
+          generator: weighted_choice
+          values: ["encode_video", "resize_image", "generate_thumbnail", "transcode_audio"]
+          weights: [35, 30, 25, 10]
+        - name: job_id
+          generator: sequence
+          prefix: "JOB-"
+          start: 30000
+        - name: duration_ms
+          generator: range
+          min: 50
+          max: 8000
+          integer: true
+        - name: outcome
+          generator: weighted_choice
+          values: ["success", "retry", "failed"]
+          weights: [94, 4, 2]
+      message_template: "worker=03 {job_type} job={job_id} duration={duration_ms}ms -> {outcome}"
+
+    # ── Worker-04 — freezes silently at 30 minutes ────────────────────────
+    #
+    # Uses phases to model a frozen process:
+    #   - Phase 1 (0–30 min): normal operation, identical to workers 01-03
+    #   - Phase 2 (30–90 min): rate drops to near-zero (process frozen,
+    #     not crashed — the process is still alive but stuck in a deadlock
+    #     or infinite loop, emitting no output)
+    #
+    # The aggregate log stream looks like 3 workers instead of 4.
+    # No alarm fires.
+    - name: worker-04
+      type: background_worker
+      error_rate: 0.005
+      fields:
+        - name: job_type
+          generator: weighted_choice
+          values: ["encode_video", "resize_image", "generate_thumbnail", "transcode_audio"]
+          weights: [35, 30, 25, 10]
+        - name: job_id
+          generator: sequence
+          prefix: "JOB-"
+          start: 40000
+        - name: duration_ms
+          generator: range
+          min: 50
+          max: 8000
+          integer: true
+        - name: outcome
+          generator: weighted_choice
+          values: ["success", "retry", "failed"]
+          weights: [94, 4, 2]
+      message_template: "worker=04 {job_type} job={job_id} duration={duration_ms}ms -> {outcome}"
+      phases:
+        - name: normal
+          duration: 30m
+          rate: 15/s
+        - name: frozen
+          # Process is alive but logging nothing. Rate ≈ 0 models this.
+          # In reality: one suspicious log per ~17 minutes (stuck-thread
+          # watchdog) but essentially silent.
+          duration: 60m
+          rate: 0.001/s
+
+    # ── Queue Monitor ─────────────────────────────────────────────────────
+    # Observes backlog depth. After worker-04 freezes, backlog grows
+    # because throughput drops 25%. If backlog is logged as a field,
+    # FieldDrift on the queue_depth parameter could detect the growing
+    # backlog — but only after the PH detector accumulates enough
+    # deviation over many windows (slow trend detection issue again).
+    - name: queue-monitor
+      type: background_worker
+      rate: 1/s
+      error_rate: 0.0
+
+      state:
+        backlog:
+          initial: 100
+          max: 50000
+          # After worker-04 freezes, effective intake rate = 75% of before.
+          # Backlog grows at 25% of the input rate = ~3.75 items/s.
+          # At 1 monitor log/s, we encode the growing backlog as a field.
+          growth_per_request: 0.0  # static until incident adjusts it
+
+      fields:
+        - name: queue_depth
+          generator: range
+          min: 80
+          max: 120
+          integer: true
+        - name: workers_active
+          generator: weighted_choice
+          values: ["4", "3"]
+          weights: [50, 50]
+        - name: throughput_eps
+          generator: range
+          min: 55
+          max: 65
+          integer: true
+      message_template: "queue depth={queue_depth} workers={workers_active} throughput={throughput_eps}/s"
+
+    # ── Incident: worker-04 loses its queue consumer lease ─────────────────
+    # After the freeze, the queue manager notices the missing heartbeat
+    # and logs a timeout. This IS a VanishedTemplate candidate — but only
+    # for the heartbeat-specific template, not the job-processing template.
+    - name: queue-manager
+      type: background_worker
+      rate: 0.5/s
+      fields:
+        - name: event
+          generator: weighted_choice
+          values: ["lease_renewed", "lease_expired", "consumer_registered", "consumer_deregistered"]
+          weights: [70, 15, 10, 5]
+        - name: consumer_id
+          generator: weighted_choice
+          values: ["worker-01", "worker-02", "worker-03", "worker-04"]
+          weights: [25, 25, 25, 25]
+      message_template: "QueueManager {event} consumer={consumer_id}"
+
+  incidents:
+    # At 35 minutes the queue manager notices worker-04's lease has expired.
+    # This changes the queue-manager's event distribution: lease_expired and
+    # consumer_deregistered events for worker-04 increase significantly.
+    # BranchingShift may fire here — the conditional routing in queue-manager
+    # logs now has higher entropy (unexpected failure path).
+    - name: worker04_lease_timeout
+      trigger: "time > 35m"
+      duration: 0
+      effects:
+        - target: queue-manager
+          error_rate: 0.20

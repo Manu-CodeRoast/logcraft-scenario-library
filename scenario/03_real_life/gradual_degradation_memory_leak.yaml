@@ -1,0 +1,212 @@
+# Real-Life 12 — Gradual Degradation: JVM Memory Leak
+#
+# ── What this scenario exercises ──────────────────────────────────────────────
+#
+# A Java-based order-processing service with a slow memory leak.
+# Heap usage grows at ~0.028 MB per request. Over 90 minutes the heap
+# crosses four thresholds, each adding latency and errors:
+#
+#   0 – 19 min  heap  512 – 2048 MB  error_rate ≈ 0.005  (baseline)
+#  19 – 43 min  heap 2048 – 4096 MB  error_rate ≈ 0.010  (early degradation)
+#  43 – 66 min  heap 4096 – 6144 MB  error_rate ≈ 0.050  (noticeable GC pauses)
+#  66 – 85 min  heap 6144 – 7680 MB  error_rate ≈ 0.150  (heavy GC pressure)
+#  85 – 90 min  heap 7680 – 8192 MB  error_rate ≈ 0.450  (near-OOM)
+#
+# ── InSight detection blind spot ─────────────────────────────────────────────
+#
+# PAGE-HINKLEY STEALTH ZONE FOR SLOW TRENDS
+#
+# Page-Hinkley uses a running mean: mean += (JSD - mean) / n.
+# When the signal increases gradually, the mean tracks it and the
+# residual (JSD - mean - delta) stays near zero. The cumulative sum
+# never accumulates enough deviation to cross lambda=50.
+#
+# At 5-min windows with 15,000 events/window, the per-window JSD
+# change driven by a 0.5% error-rate increase is on the order of 1e-6
+# — four orders of magnitude below PH's delta=0.005 tolerance band.
+# The mean simply absorbs the drift.
+#
+# What InSight DOES catch:
+#   • Spike fires in the final windows when error counts exceed
+#     spike_threshold (absolute volume detector, not trend-aware).
+#   • FieldDrift may eventually fire on the "error_code" parameter
+#     distribution once PH accumulates enough cross-window divergence
+#     from the slow shift — but only after many windows, and only
+#     with the error codes present in top_k.
+#   • VanishedTemplate: does NOT fire. The success-path template never
+#     disappears; the error template was always present, just rarer.
+#
+# What InSight MISSES:
+#   • The TRAJECTORY — the fact that every window is slightly worse
+#     than the last, week-over-week trending toward collapse.
+#   • Early warning: no detection fires in the first 66 minutes,
+#     during which the system is degrading measurably.
+#   • The root cause signal: heap growth is not observable in logs
+#     unless the application explicitly emits GC events (see below).
+#
+# Required for reliable detection of gradual trends:
+#   • Monotone drift detector (MOSUM or Sen's slope estimator)
+#     operating on per-window error-fraction rather than JSD.
+#   • Or: explicit metric emission (heap_mb as a FieldDrift target).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+scenario:
+  name: "gradual-degradation-memory-leak"
+  seed: 42
+  duration: 90m
+
+  environment:
+    region: us-east-1
+    cluster: prod-ecommerce
+    service: order-service
+    version: v4.1.2-SNAPSHOT
+
+  # ── Templates ──────────────────────────────────────────────────────────────
+  templates:
+    jvm_worker:
+      rate: 50/s
+      error_rate: 0.005
+      latency_ms:
+        distribution: percentile
+        p50: 18
+        p95: 80
+        p99: 250
+
+  # ── Agents ─────────────────────────────────────────────────────────────────
+  agents:
+    # Primary application server — the leaking process
+    - name: order-service
+      type: api_service
+      use: jvm_worker
+
+      # Heap tracking via state variable.
+      # growth_per_request chosen so heap reaches 8192 MB in 90 min at 50/s.
+      #   50 req/s × 5400s = 270,000 requests → 7680 MB growth / 270k ≈ 0.0285
+      state:
+        heap_mb:
+          initial: 512
+          max: 8192
+          growth_per_request: 0.0285
+
+      effects:
+        - when: "heap_mb > 2048"
+          error_rate: 0.010
+          latency_ms:
+            distribution: percentile
+            p50: 28
+            p95: 140
+            p99: 500
+        - when: "heap_mb > 4096"
+          error_rate: 0.050
+          latency_ms:
+            distribution: percentile
+            p50: 55
+            p95: 350
+            p99: 1800
+        - when: "heap_mb > 6144"
+          error_rate: 0.150
+          latency_ms:
+            distribution: percentile
+            p50: 120
+            p95: 900
+            p99: 4500
+        - when: "heap_mb > 7680"
+          error_rate: 0.450
+          latency_ms:
+            distribution: percentile
+            p50: 350
+            p95: 3000
+            p99: 12000
+
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [GET, POST, PUT]
+          weights: [55, 35, 10]
+        - name: path
+          generator: weighted_choice
+          values: ["/api/orders", "/api/orders/status", "/api/orders/cancel"]
+          weights: [50, 35, 15]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "400", "500", "503"]
+          weights: [85, 8, 4, 2, 1]
+        - name: order_id
+          generator: sequence
+          prefix: "ORD-"
+          start: 100000
+        - name: error_code
+          generator: weighted_choice
+          values: ["NONE", "TIMEOUT", "DB_LOCK", "OOM_RETRY", "UNKNOWN"]
+          weights: [94, 3, 2, 0, 1]
+      message_template: "{method} {path} order={order_id} -> {status_code}"
+
+    # GC log emitter — explicit heap telemetry embedded in application logs.
+    # This IS detectable by InSight via FieldDrift on the heap_pct parameter,
+    # but only if the heap metric is in the top_k templates.
+    - name: order-service-gc
+      type: background_worker
+      rate: 2/s
+      error_rate: 0.0
+
+      state:
+        heap_ratio:
+          initial: 0.06   # 512/8192
+          max: 1.0
+          growth_per_request: 0.0000034  # 512→8192 in 270k requests
+
+      effects:
+        - when: "heap_ratio > 0.25"
+          rate: 4/s        # more frequent GC events as pressure builds
+        - when: "heap_ratio > 0.50"
+          rate: 8/s
+        - when: "heap_ratio > 0.75"
+          rate: 16/s
+
+      fields:
+        - name: gc_type
+          generator: weighted_choice
+          values: ["minor", "major", "concurrent_mark"]
+          weights: [75, 15, 10]
+        - name: gc_duration_ms
+          generator: range
+          min: 2
+          max: 4000
+          integer: true
+        - name: heap_pct
+          generator: range
+          min: 6
+          max: 100
+          integer: true
+      message_template: "GC {gc_type} pause={gc_duration_ms}ms heap={heap_pct}%"
+
+    # Downstream read replica — unaffected, provides stable baseline signal.
+    # InSight should see this service as static while order-service degrades.
+    - name: read-replica
+      type: database
+      rate: 30/s
+      error_rate: 0.001
+      latency_ms:
+        distribution: normal
+        mean: 5
+        stddev: 2
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: ["SELECT", "COUNT"]
+          weights: [80, 20]
+        - name: table
+          generator: choice
+          values: ["orders", "order_items", "customers"]
+        - name: rows
+          generator: range
+          min: 1
+          max: 500
+          integer: true
+      message_template: "{query_type} {table} rows={rows}"
+
+  interactions:
+    - from: order-service
+      to: read-replica
+      type: dependency

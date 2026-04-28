@@ -1,0 +1,226 @@
+# Real-Life 13 — Oscillating Circuit Breaker
+#
+# ── What this scenario exercises ──────────────────────────────────────────────
+#
+# A payment gateway protected by a circuit breaker. The upstream payment
+# processor periodically becomes unreachable, causing the breaker to trip
+# (OPEN), reject calls for a timeout window, then attempt recovery
+# (HALF-OPEN), and eventually close again. This cycle repeats throughout
+# the scenario.
+#
+# The health_state machine models the circuit breaker lifecycle:
+#   State 0 (CLOSED / Healthy)  — normal operation, low errors
+#   State 1 (DEGRADED)          — upstream latency rising, breaker about to trip
+#   State 2 (OPEN / Failing)    — breaker open, all calls rejected fast
+#   State 3 (HALF-OPEN / Recovering) — probe traffic allowed, testing upstream
+#
+# Transition probabilities are tuned for ~4-minute failure cycles:
+#   healthy → degraded  : 0.004/tick  (avg ~250 ticks in healthy)
+#   degraded → failing  : 0.12/tick   (avg ~8 ticks in degraded)
+#   failing → recovering: 0.06/tick   (avg ~17 ticks = ~3 min breaker timeout)
+#   recovering → healthy: 0.20/tick   (avg ~5 ticks in half-open)
+#
+# ── InSight detection blind spot ─────────────────────────────────────────────
+#
+# CUSUM RESET TRAP / SINGLE-SCALE EVIDENCE FRAGMENTATION
+#
+# CUSUM resets immediately after alarming (cs_[scale].reset()) to
+# re-arm for the next shift. For an oscillating failure:
+#
+#   1. CUSUM fires on the first error burst → resets to 0.
+#   2. System recovers → CUSUM observes low-JSD windows → remains quiet.
+#   3. Next burst → CUSUM fires again → resets again.
+#
+# This produces N separate Drift reports (one per burst) but they are
+# always at scale 0 (the acute diff: raw[t-1] vs raw[t]).
+#
+# The EvidenceBuffer accumulates these Drift entries, but they are all
+# at scale 0. HierarchicalGate requires min_scales_agreement=2 — at
+# least two distinct scales must agree. Since the failure bursts are
+# shorter than the pyramid's fanout=12 window baseline horizon, the
+# baseline (scale 1) never accumulates the signal: the composed baseline
+# averages 12 windows including both good and bad states, washing out
+# the spike into noise. Composite NEVER fires.
+#
+# Page-Hinkley also reacts poorly: PH observes alternating high/low JSD.
+# After a few cycles, mean ≈ mid-range JSD. Cumulative swings positive
+# on bad windows and negative on good windows. ph_min is reset by the
+# good windows. Score (cumulative - minimum) stays modest. PH may alarm
+# once (after enough bad windows accumulate), then the next good cycle
+# reduces cumulative below the new minimum, resetting effective progress.
+#
+# What InSight DOES catch:
+#   • Repeated Drift reports at scale 0 (CUSUM) on each failure burst.
+#   • BranchingShift if the breaker open/closed state alters call routing.
+#   • VanishedTemplate at scale 0 for payment-success template during
+#     OPEN state (confidence=0.5 — low).
+#
+# What InSight MISSES:
+#   • The PATTERN: that the system has been oscillating for 90 minutes.
+#   • Composite never forms: all evidence is scale-0 only.
+#   • No "flapping" detection type: the system cannot distinguish between
+#     "one bad window" and "30 bad windows interleaved with good ones".
+#   • PH does not detect the periodicity of the failure cycle.
+#
+# Required for reliable detection of oscillating failures:
+#   • Spectral / autocorrelation analysis on the JSD time series.
+#   • A "flap detector" that counts alarm/clear cycles within a window.
+#   • Or: a min_scales_agreement=1 mode for single-source Composite,
+#     accepting higher false-positive rate in exchange for catching
+#     sustained (not just multi-scale) anomalies.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+scenario:
+  name: "oscillating-circuit-breaker"
+  seed: 42
+  duration: 90m
+
+  environment:
+    region: eu-west-1
+    cluster: prod-payments
+    version: v2.3.1
+
+  agents:
+    # ── Payment Gateway ─────────────────────────────────────────────────────
+    # Circuit breaker lives here. Oscillates via health_state machine.
+    - name: payment-gateway
+      type: api_service
+      rate: 80/s
+      error_rate: 0.008
+
+      health_state:
+        # [CLOSED, DEGRADED, OPEN, HALF-OPEN]
+        latency_multipliers: [1.0, 2.5, 0.05, 1.2]
+        error_rates:         [0.008, 0.12, 0.98, 0.08]
+        transitions:
+          # Fast-failing breaker: degrades quickly, opens quickly,
+          # but has a realistic 3-minute open timeout before recovery.
+          healthy_to_degraded: 0.004
+          degraded_to_failing:  0.12
+          failing_to_recovering: 0.06
+          recovering_to_healthy: 0.20
+
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [POST, GET]
+          weights: [70, 30]
+        - name: path
+          generator: weighted_choice
+          values: ["/v2/payments/charge", "/v2/payments/refund", "/v2/payments/status"]
+          weights: [55, 15, 30]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "202", "402", "503", "429"]
+          weights: [84, 8, 3, 4, 1]
+        - name: payment_id
+          generator: sequence
+          prefix: "PAY-"
+          start: 880000
+        - name: cb_state
+          generator: weighted_choice
+          values: ["CLOSED", "OPEN", "HALF-OPEN"]
+          weights: [65, 28, 7]
+        - name: upstream_ms
+          generator: range
+          min: 0
+          max: 5000
+          integer: true
+      message_template: "{method} {path} pay={payment_id} -> {status_code} cb={cb_state}"
+
+    # ── Upstream Payment Processor ─────────────────────────────────────────
+    # External service that the gateway depends on. Its failures are the
+    # root cause — but InSight only sees the gateway's outward-facing logs.
+    - name: payment-processor
+      type: api_service
+      rate: 60/s
+      error_rate: 0.005
+
+      health_state:
+        # Processor has its own failure pattern — independent, slightly
+        # offset from the gateway's circuit breaker state. This creates
+        # the "slightly out of phase" oscillation seen in real incidents.
+        latency_multipliers: [1.0, 4.0, 15.0, 2.0]
+        error_rates:         [0.005, 0.10, 0.60, 0.03]
+        transitions:
+          healthy_to_degraded:  0.003
+          degraded_to_failing:  0.15
+          failing_to_recovering: 0.07
+          recovering_to_healthy: 0.18
+
+      fields:
+        - name: operation
+          generator: weighted_choice
+          values: ["authorize", "capture", "void", "refund"]
+          weights: [45, 35, 10, 10]
+        - name: result
+          generator: weighted_choice
+          values: ["approved", "declined", "timeout", "error"]
+          weights: [87, 8, 3, 2]
+        - name: provider
+          generator: weighted_choice
+          values: ["stripe", "adyen", "braintree"]
+          weights: [60, 25, 15]
+      message_template: "{operation} via {provider}: {result}"
+
+    # ── API Gateway (stable) ────────────────────────────────────────────────
+    # Receives user requests and routes to payment-gateway. Stable itself;
+    # errors only propagate from payment-gateway when breaker is open.
+    - name: api-gateway
+      type: api_service
+      rate: 120/s
+      error_rate: 0.003
+
+      fields:
+        - name: path
+          generator: weighted_choice
+          values: ["/checkout", "/order/confirm", "/cart/pay"]
+          weights: [50, 30, 20]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "400", "503"]
+          weights: [88, 6, 4, 2]
+        - name: user_id
+          generator: range
+          min: 1000
+          max: 99999
+          integer: true
+      message_template: "POST {path} user={user_id} -> {status_code}"
+
+    # ── Circuit Breaker Audit Log ───────────────────────────────────────────
+    # Explicit state transition log emitted by the breaker framework.
+    # This IS a BranchingShift signal (state transitions change call routing
+    # entropy). InSight's BranchingShift should fire when the "OPEN" state
+    # starts dominating transitions.
+    - name: circuit-breaker-audit
+      type: background_worker
+      rate: 1/s
+
+      fields:
+        - name: from_state
+          generator: weighted_choice
+          values: ["CLOSED", "OPEN", "HALF-OPEN"]
+          weights: [50, 30, 20]
+        - name: to_state
+          generator: weighted_choice
+          values: ["CLOSED", "OPEN", "HALF-OPEN"]
+          weights: [40, 40, 20]
+        - name: reason
+          generator: weighted_choice
+          values: ["failure_threshold", "timeout_elapsed", "probe_success", "probe_fail"]
+          weights: [35, 30, 20, 15]
+      message_template: "CircuitBreaker transition {from_state} -> {to_state} reason={reason}"
+
+  interactions:
+    - from: api-gateway
+      to: payment-gateway
+      type: request
+    - from: payment-gateway
+      to: payment-processor
+      type: dependency
+
+  auto_cascade:
+    error_threshold: 0.30
+    dampening_factor: 0.4
+    blast_radius: 2
