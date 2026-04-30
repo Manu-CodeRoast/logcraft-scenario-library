@@ -1,0 +1,148 @@
+# Real-Life 15 — Incident Recovery Cycle
+#
+# ── What this scenario exercises ──────────────────────────────────────────────
+#
+# A payment processing API backed by a PostgreSQL database. The scenario runs
+# three distinct phases:
+#
+#   Phase 1  (0 – 10 min)  Healthy baseline
+#     Low error rate, fast responses, normal log template mix.
+#
+#   Phase 2  (10 – 20 min)  DB overload incident
+#     Upstream DB becomes saturated: connection-pool exhaustion causes the API
+#     to emit NEW log templates (connection_pool_exhausted, db_timeout,
+#     payment_retried) that were not present during the healthy phase.
+#     InSight observes:
+#       • NoveltyNGram  — new error n-grams appear in top_ngrams
+#       • Spike         — db_timeout count exceeds spike_threshold
+#       • Drift         — JSD increases at acute scale
+#     novel_template_ids_ is populated with the DB-error template IDs.
+#
+#   Phase 3  (20 – 30 min)  Recovery
+#     DB is restarted; connections re-established. Error templates stop
+#     emitting. The healthy template mix resumes.
+#     InSight observes:
+#       • VanishedTemplate — the three error templates disappear
+#         ↳ polarity:recovery_candidate[was_novel]   (correct)
+#       • BranchingShift (dominant_path_shift)
+#         ↳ polarity:simplifying                     (path shrinks)
+#     Without §2.6 polarity disambiguation these would be rated High/Medium
+#     and generate spurious operator pages during recovery.
+#
+# ── Expected InSight behaviour ────────────────────────────────────────────────
+#
+#   Phase 2 detections (onset):
+#     Spike[db_timeout], NoveltyNGram, Drift[acute] → High/Medium → operator alert
+#
+#   Phase 3 detections (recovery — after §2.6 fix):
+#     VanishedTemplate[polarity:recovery_candidate] → Low (no page)
+#     BranchingShift[polarity:simplifying]          → Low (no page)
+#
+#   Alert rate during Phase 3 must be ≤ steady-state Phase 1 rate.
+#
+# ── §2.6 blind spot (before fix) ─────────────────────────────────────────────
+#
+#   VanishedTemplate fires in BOTH phases:
+#     Phase 2: healthy templates disappear (onset — correct High severity)
+#     Phase 3: error templates disappear   (recovery — FALSE High severity)
+#
+#   Without polarity disambiguation, Phase 3 VanishedTemplate is indistinguishable
+#   from Phase 2 VanishedTemplate at the detection layer.  The explain layer
+#   emits a "High" severity insight for a system that is actively recovering.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+scenario:
+  name: "incident-recovery-cycle"
+  seed: 42
+  duration: 30m
+
+  environment:
+    region: us-east-1
+    cluster: prod-payments
+    version: v3.1.0
+
+  agents:
+    # ── Payment API ─────────────────────────────────────────────────────────
+    # Phase-based: healthy → incident → recovery via explicit phases.
+    - name: payment-api
+      type: api_service
+      rate: 120/s
+      error_rate: 0.005
+      latency_ms: [5, 40]
+
+      phases:
+        # ── Phase 1: Healthy baseline (10 min) ──────────────────────────────
+        - name: healthy
+          duration: 10m
+          rate: 120/s
+          error_rate: 0.005
+          latency_ms: [5, 40]
+
+        # ── Phase 2: DB overload incident (10 min) ──────────────────────────
+        # High error rate with NEW error log templates not present in Phase 1.
+        # These new templates will fire NoveltyNGram and populate
+        # novel_template_ids_ in DetectionEngine.
+        - name: incident
+          duration: 10m
+          rate: 95/s          # volume dips as failures back off
+          error_rate: 0.45
+          latency_ms:
+            distribution: percentile
+            p50: 180
+            p95: 2400
+            p99: 8000
+
+        # ── Phase 3: Recovery (10 min) ──────────────────────────────────────
+        # DB recovers; error templates stop. Healthy traffic resumes.
+        # VanishedTemplate fires for the Phase 2 error templates.
+        - name: recovery
+          duration: 10m
+          rate: 118/s
+          error_rate: 0.008   # briefly elevated, normalising
+          latency_ms: [6, 55]
+
+    # ── PostgreSQL Primary ───────────────────────────────────────────────────
+    - name: postgres-primary
+      type: database
+      rate: 200/s
+      error_rate: 0.002
+      latency_ms: [2, 15]
+
+      phases:
+        - name: healthy
+          duration: 10m
+          rate: 200/s
+          error_rate: 0.002
+          latency_ms: [2, 15]
+
+        - name: overloaded
+          duration: 10m
+          rate: 35/s           # most connections are failing fast
+          error_rate: 0.88
+          latency_ms:
+            distribution: percentile
+            p50: 4500
+            p95: 15000
+            p99: 30000
+
+        - name: recovering
+          duration: 10m
+          rate: 190/s
+          error_rate: 0.01
+          latency_ms: [3, 25]
+
+  # ── Incident: DB saturation ─────────────────────────────────────────────────
+  # Explicit incident block so the scenario is parseable by LogCraft's incident
+  # subsystem.  Duration matches Phase 2.
+  incidents:
+    - name: db_connection_pool_exhausted
+      trigger: "time > 10m"
+      duration: 10m
+      effects:
+        - target: postgres-primary
+          latency_multiplier: 120
+          error_rate: 0.88
+        - target: payment-api
+          latency_multiplier: 6
+          error_rate: 0.45
