@@ -86,6 +86,7 @@ scenario:
       rate: 200/s
       instances: 3
       outputs: [elastic_ingest, console]
+      level_weights: {debug: 0.08, info: 0.85, warn: 0.07, error: 0.95, fatal: 0.05}
       fields:
         - name: source_file
           generator: choice
@@ -136,6 +137,7 @@ scenario:
       use: go_service
       rate: 150/s
       instances: 2
+      level_weights: {debug: 0.08, info: 0.85, warn: 0.07, error: 0.92, fatal: 0.08}
       state:
         lag:
           initial: 0
@@ -164,6 +166,7 @@ scenario:
       type: search_engine
       rate: 200/s
       error_rate: 0.005
+      level_weights: {debug: 0.05, info: 0.80, warn: 0.15, error: 0.88, fatal: 0.12}
       contention:
         max_connections: 300
         queue_latency_ms: [1, 30]

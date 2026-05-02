@@ -79,6 +79,7 @@ scenario:
     - name: order-service
       type: api_service
       use: jvm_worker
+      level_weights: {debug: 0.07, info: 0.80, warn: 0.13, error: 0.85, fatal: 0.15}
 
       # Heap tracking via state variable.
       # growth_per_request chosen so heap reaches 8192 MB in 90 min at 50/s.
@@ -149,6 +150,7 @@ scenario:
       type: background_worker
       rate: 2/s
       error_rate: 0.0
+      level_weights: {debug: 0.10, info: 0.60, warn: 0.30}
 
       state:
         heap_ratio:

@@ -149,6 +149,7 @@ scenario:
       instances: 3
       outputs: [siem, metrics, console]
       dependencies: [order-service, payment-api]
+      level_weights: {debug: 0.05, info: 0.80, warn: 0.15, error: 0.90, fatal: 0.10}
       rate_modulation:
         type: business_hours
         peak_multiplier: 1.0
@@ -168,6 +169,11 @@ scenario:
           generator: weighted_choice
           values: ["200", "201", "400", "404", "500", "503"]
           weights: [68, 10, 5, 5, 7, 5]
+          level_overrides:
+            "400": warn
+            "404": warn
+            "500": error
+            "503": error
       message_template: "{method} {path} -> {status_code}"
 
     - name: order-service
@@ -177,6 +183,7 @@ scenario:
       instances: 2
       outputs: [siem, metrics]
       dependencies: [database, notification-svc]
+      level_weights: {debug: 0.07, info: 0.78, warn: 0.15, error: 0.88, fatal: 0.12}
       health_state:
         latency_multipliers: [1.0, 2.5, 8.0, 2.0]
         error_rates: [0.005, 0.04, 0.25, 0.02]
@@ -194,12 +201,17 @@ scenario:
           generator: weighted_choice
           values: [success, failed, timeout, validation_error]
           weights: [78, 10, 7, 5]
+          level_overrides:
+            failed: warn
+            timeout: warn
+            validation_error: warn
       message_template: "Order {action}: {result}"
 
     - name: payment-api
       type: external_api
       rate: 40/s
       error_rate: 0.008
+      level_weights: {debug: 0.03, info: 0.72, warn: 0.25, error: 0.80, fatal: 0.20}
       outputs: [siem, metrics]
       availability:
         uptime: 0.990
@@ -224,12 +236,17 @@ scenario:
           generator: weighted_choice
           values: [approved, declined, timeout, error]
           weights: [75, 12, 8, 5]
+          level_overrides:
+            declined: warn
+            timeout: warn
+            error: error
       message_template: "Payment {operation}: {result}"
 
     - name: database
       type: database
       rate: 150/s
       error_rate: 0.003
+      level_weights: {debug: 0.05, info: 0.85, warn: 0.10, error: 1.0}
       outputs: [siem, metrics]
       contention:
         max_connections: 150

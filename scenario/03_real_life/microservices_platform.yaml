@@ -150,6 +150,7 @@ scenario:
       rate: 300/s
       instances: 5
       dependencies: [ingest-service, query-engine, auth-proxy]
+      level_weights: {debug: 0.05, info: 0.80, warn: 0.15, error: 0.90, fatal: 0.10}
       request_flow:
         - call: auth-proxy
           timeout_ms: 20
@@ -205,6 +206,7 @@ scenario:
       rate: 250/s
       instances: 3
       dependencies: [kafka-broker]
+      level_weights: {debug: 0.08, info: 0.85, warn: 0.07, error: 0.95, fatal: 0.05}
       latency_ms:
         distribution: normal
         mean: 8
@@ -260,6 +262,7 @@ scenario:
       use: java_microservice
       instances: 4
       dependencies: [kafka-broker, storage-writer]
+      level_weights: {debug: 0.12, info: 0.73, warn: 0.15, error: 0.88, fatal: 0.12}
       state:
         backlog_size:
           initial: 0
@@ -321,6 +324,7 @@ scenario:
       use: java_microservice
       instances: 3
       dependencies: [storage-writer]
+      level_weights: {debug: 0.08, info: 0.76, warn: 0.16, error: 0.85, fatal: 0.15}
       state:
         active_queries:
           initial: 0

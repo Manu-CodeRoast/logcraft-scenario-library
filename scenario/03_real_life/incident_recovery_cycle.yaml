@@ -70,6 +70,26 @@ scenario:
       rate: 120/s
       error_rate: 0.005
       latency_ms: [5, 40]
+      level_weights: {debug: 0.04, info: 0.76, warn: 0.20, error: 0.80, fatal: 0.20}
+      message_template: "{method} /v1/payments/{endpoint} -> {status_code}"
+      fields:
+        - name: method
+          generator: weighted_choice
+          values: [POST, GET, PUT]
+          weights: [70, 20, 10]
+        - name: endpoint
+          generator: weighted_choice
+          values: [charge, refund, status, authorize, capture]
+          weights: [45, 15, 25, 10, 5]
+        - name: status_code
+          generator: weighted_choice
+          values: ["200", "201", "400", "422", "500", "503"]
+          weights: [60, 15, 8, 7, 6, 4]
+          level_overrides:
+            "500": error
+            "503": error
+            "422": warn
+            "400": warn
 
       phases:
         # ── Phase 1: Healthy baseline (10 min) ──────────────────────────────
@@ -108,6 +128,30 @@ scenario:
       rate: 200/s
       error_rate: 0.002
       latency_ms: [2, 15]
+      level_weights: {debug: 0.05, info: 0.85, warn: 0.10, error: 1.0}
+      message_template: "{query_type} {schema}.{table}: {rows_affected} rows ({duration_ms}ms)"
+      fields:
+        - name: query_type
+          generator: weighted_choice
+          values: [SELECT, INSERT, UPDATE, DELETE, BEGIN, COMMIT]
+          weights: [50, 20, 15, 8, 4, 3]
+        - name: schema
+          generator: choice
+          values: [payments, accounts, audit]
+        - name: table
+          generator: weighted_choice
+          values: [transactions, payment_intents, refunds, accounts, audit_log]
+          weights: [40, 25, 15, 15, 5]
+        - name: rows_affected
+          generator: range
+          min: 0
+          max: 500
+          integer: true
+        - name: duration_ms
+          generator: range
+          min: 1
+          max: 50
+          integer: true
 
       phases:
         - name: healthy
