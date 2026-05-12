@@ -496,6 +496,34 @@ Simulate pipeline imperfections: duplicated records, missing fields, timing jitt
 
 ---
 
+## Replay
+
+LogCraft can record a run to disk and play it back later — a way to feed the same
+log stream into a tool multiple times without re-running the simulation.
+
+To capture a run, add a `recording` output:
+
+```yaml
+outputs:
+  - type: console
+    format: json
+  - type: recording
+    path: captures/my_run.logcraft
+```
+
+To replay it:
+
+```bash
+logcraft replay captures/my_run.logcraft
+```
+
+Replay emits the captured records in the original order and timing, byte-identical
+to the original run. Use it when you want to re-ingest a fixed, previously captured
+stream: feeding the same access log burst through a new parser version, or running a
+recorded incident through a different backend.
+
+---
+
 ## Deterministic mode
 
 By default, every run produces different logs — randomization seeds from the system
@@ -536,6 +564,24 @@ run and can't reproduce the problem.
 
 **Multi-machine consistency.** Two engineers, two machines, two timezones. With
 `seed:`, they get the same logs. Without it, they don't.
+
+### Why seed is better than replay
+
+Replay answers "same logs again" by playing back a fixed file. `seed:` answers the
+same question differently: the scenario itself becomes the reproducible artifact.
+
+- **Fixture size.** A 20-line YAML file in git, not a 200 MB JSONL recording.
+- **Iterability.** Change a field, re-run, get a different-but-still-reproducible
+  stream. Replay locks you to one recording; every scenario edit requires a new
+  recording that is incomparable to the last.
+- **Sharing.** "Run this YAML with seed 42" works for any colleague on any machine.
+  Distributing a recording means shipping a large binary file.
+- **Timestamps.** Replayed records carry timestamps from when the recording was made.
+  `seed:` generates timestamps relative to the run start — correct for any test that
+  checks time-windowed alerting behavior.
+- **Internal state.** Recording captures output only. Health state transitions, state
+  variable values, and incident timing are not stored and cannot be replayed; `seed:`
+  reproduces all of it exactly.
 
 The free CLI is the right tool for exploration, development, and one-shot generation.
 When you need the scenario to be a stable artifact — something you can pin, version,
