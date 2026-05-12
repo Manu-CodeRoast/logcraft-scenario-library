@@ -4,7 +4,7 @@ from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain
 
 class LogCraftPlaygroundConan(ConanFile):
     name = "logcraft_playground"
-    version = "1.3.3"
+    version = "0.1.0"
     package_type = "application"
     description = "Public LogCraft playground scenarios and CLI consumer."
     settings = "os", "arch", "compiler", "build_type"
