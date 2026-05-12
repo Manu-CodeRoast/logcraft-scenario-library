@@ -13,21 +13,19 @@ logcraft my_scenario.yaml
 
 ---
 
-## Capability Tiers
+## CLI vs CodeRoast
 
-When running through the CodeRoast playground server, features are gated by tier.
-The standalone CLI binary has full unrestricted access to all features except those
-marked **CLI only** (which are only meaningful locally).
+The free CLI binary includes every feature documented here with one exception: **`seed:`
+(deterministic mode) requires [CodeRoast](https://coderoast.fr)**. Without `seed:`, each
+run produces unique randomized logs — which is the right default for exploration and
+testing.
 
-| Badge | Tier | Who can use it |
-|-------|------|---------------|
-| **[Anyone]** | Anyone | No login required |
-| **[Free]** | Free | Logged-in free users |
-| **[Pro]** | Pro | Pro subscription |
-| **[Enterprise]** | Enterprise | Enterprise accounts |
-| **[CLI only]** | — | Standalone binary only; server rejects for all tiers |
+The `insight_shm` output sink connects to InSight's shared-memory IPC channel; it is
+only useful when running inside the CodeRoast platform.
 
-Permissions are additive: Pro includes all Free and Anyone capabilities, etc.
+All other features — every field generator, every output format, all the chaos tooling
+(phases, incidents, health state machine, rate modulation, state variables, noise) —
+are available to the free CLI.
 
 ---
 
@@ -80,7 +78,6 @@ Permissions are additive: Pro includes all Free and Anyone capabilities, etc.
 - [Pipeline](#pipeline)
 - [Time Context](#time-context)
 - [Environment](#environment)
-- [Tier Matrix](#tier-matrix)
 
 ---
 
@@ -98,32 +95,32 @@ scenario:
       rate: 100/s
 ```
 
-| Key | Type | Default | Tier | Description |
-|-----|------|---------|------|-------------|
-| `name` | string | `"unnamed"` | **[Anyone]** | Human-readable scenario name |
-| `duration` | string/number | `0` | **[Free]** | Auto-stop duration (`0` = run forever). See [Duration Format](#duration-format) |
-| `duration_seconds` | number | `0.0` | **[Free]** | Legacy alias for `duration` in raw seconds; `duration` takes precedence |
-| `seed` | uint64 | absent | **[Free]** | Sets deterministic mode. See [Engine Modes](#engine-modes) |
-| `agents` | sequence | required | **[Anyone]** | One or more agent definitions |
-| `outputs` | sequence | `[{type: console, format: json}]` | — | Output sink definitions |
-| `environment` | map | absent | **[Free]** | Global metadata (region, cluster, version) |
-| `noise` | map | absent | **[Pro]** | Global noise settings |
-| `users` | map | absent | **[Pro]** | Simulated user pool |
-| `personas` | sequence | absent | **[Pro]** | User behavior profiles |
-| `entity_pool` | sequence | absent | **[Pro]** | Shared entity IDs for cross-agent correlation |
-| `field_variations` | sequence | absent | **[Pro]** | Numeric field jitter config |
-| `log_format` | map | absent | **[Free]** | Output field selection |
-| `templates` | map | absent | **[Pro]** | Named reusable agent presets |
-| `interactions` | sequence | absent | **[Pro]** | Cross-agent dependency declarations |
-| `rules` | sequence | absent | **[Enterprise]** | Propagation rules |
-| `incidents` | sequence | absent | **[Pro]** | Time- or probability-triggered events |
-| `auto_cascade` | map | absent | **[Enterprise]** | Automatic error cascading |
-| `registry` | map | absent | **[Enterprise]** | External agent file registry |
-| `includes` | sequence | absent | **[CLI only]** | Merge other YAML files |
-| `replay` | map | absent | **[CLI only]** | Replay a recorded session |
-| `clock` | map | absent | — | Simulation clock config |
-| `pipeline` | map | absent | — | Sharded pipeline config |
-| `time` | map | absent | — | Timezone context |
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | `"unnamed"` | Human-readable scenario name |
+| `duration` | string/number | `0` | Auto-stop duration (`0` = run forever). See [Duration Format](#duration-format) |
+| `duration_seconds` | number | `0.0` | Legacy alias for `duration` in raw seconds; `duration` takes precedence |
+| `seed` | uint64 | absent | Sets deterministic mode — **requires CodeRoast**. See [Engine Modes](#engine-modes) |
+| `agents` | sequence | required | One or more agent definitions |
+| `outputs` | sequence | `[{type: console, format: json}]` | Output sink definitions |
+| `environment` | map | absent | Global metadata (region, cluster, version) |
+| `noise` | map | absent | Global noise settings |
+| `users` | map | absent | Simulated user pool |
+| `personas` | sequence | absent | User behavior profiles |
+| `entity_pool` | sequence | absent | Shared entity IDs for cross-agent correlation |
+| `field_variations` | sequence | absent | Numeric field jitter config |
+| `log_format` | map | absent | Output field selection |
+| `templates` | map | absent | Named reusable agent presets |
+| `interactions` | sequence | absent | Cross-agent dependency declarations |
+| `rules` | sequence | absent | Propagation rules |
+| `incidents` | sequence | absent | Time- or probability-triggered events |
+| `auto_cascade` | map | absent | Automatic error cascading |
+| `registry` | map | absent | External agent file registry |
+| `includes` | sequence | absent | Merge other YAML files |
+| `replay` | map | absent | Replay a recorded session |
+| `clock` | map | absent | Simulation clock config |
+| `pipeline` | map | absent | Sharded pipeline config |
+| `time` | map | absent | Timezone context |
 
 ---
 
@@ -161,7 +158,7 @@ When both are present, `rate` takes precedence.
 | Mode | Selected by | Clock | Notes |
 |------|-------------|-------|-------|
 | **Real** | no `seed:` | `real` | Default. Randomized each run. |
-| **Deterministic** | `seed:` present | `virtual` (required) | Same logs every run. Requires `pipeline.backpressure: block`. Rejects `time.timezone: local`. |
+| **Deterministic** | `seed:` present | `virtual` (required) | Same logs every run. Requires CodeRoast. Requires `pipeline.backpressure: block`. Rejects `time.timezone: local`. |
 
 In deterministic mode, the loader auto-creates a `clock: {mode: virtual}` and sets
 `pipeline.backpressure: block` when those blocks are absent, and emits a notice.
@@ -181,48 +178,48 @@ outputs:
     batch_size: 100
     flush_interval_ms: 1000
 
-  - type: console          # CLI only
+  - type: console
     format: json
 ```
 
 ### Output Types
 
-| Value | Tier | Description |
-|-------|------|-------------|
-| `console` | **[CLI only]** | Print to stdout |
-| `file` | **[CLI only]** | Write to disk with optional rotation |
-| `recording` | **[CLI only]** | Write JSONL for later replay |
-| `http` | **[Free]** | Batched HTTP POST (e.g. Elasticsearch, Loki, any webhook) |
-| `prometheus` | **[Enterprise]** | Expose `/metrics` scrape endpoint |
-| `statsd` | **[Enterprise]** | Push metrics over UDP |
-| `insight_shm` | **[Enterprise]** | Shared-memory IPC channel for InSight integration |
+| Value | Description |
+|-------|-------------|
+| `console` | Print to stdout |
+| `file` | Write to disk with optional rotation |
+| `recording` | Write JSONL for later replay |
+| `http` | Batched HTTP POST (e.g. Elasticsearch, Loki, any webhook) |
+| `prometheus` | Expose `/metrics` scrape endpoint (CodeRoast) |
+| `statsd` | Push metrics over UDP (CodeRoast) |
+| `insight_shm` | Shared-memory IPC channel for InSight integration (CodeRoast platform only) |
 
 ### Output Formats
 
 Every output except `prometheus` and `statsd` requires a `format:` (or `formats:`) field.
 
-| Value | Alias | Tier | Description |
-|-------|-------|------|-------------|
-| `json` | — | **[Free]** | Structured JSON, newline-delimited |
-| `text` | — | **[Free]** | Human-readable key=value |
-| `clf` | — | **[Free]** | Apache/Nginx Combined Log Format |
-| `apache_error` | — | **[Free]** | Apache error log |
-| `log4j` | — | **[Free]** | Log4j / Python logging format |
-| `syslog` | — | **[Free]** | BSD syslog (RFC 3164) |
-| `rfc5424` | — | **[Free]** | IETF syslog (RFC 5424) |
-| `nginx_error` | — | **[Free]** | Nginx error log |
-| `kv` | `logfmt` | **[Free]** | Key=value / logfmt |
-| `android_logcat` | — | **[Pro]** | Android logcat |
-| `windows_cbs` | — | **[Pro]** | Windows CBS/CSI log |
-| `spark_hdfs` | `spark` | **[Pro]** | Apache Spark / HDFS |
-| `health_app` | — | **[Pro]** | Health app pipe-delimited |
-| `proxifier` | — | **[Pro]** | Proxifier bracket format |
-| `cloudwatch` | — | **[Pro]** | AWS CloudWatch JSON |
-| `systemd_journal` | — | **[Pro]** | systemd journal JSON export |
-| `hpc` | `bgl` | **[Pro]** | HPC / Blue Gene/L |
-| `iis_w3c` | `iis` | **[Pro]** | IIS W3C Extended log |
-| `ecs` | — | **[Enterprise]** | Elastic Common Schema 8.x |
-| `otel` | `opentelemetry`, `otlp` | **[Enterprise]** | OpenTelemetry OTLP JSON |
+| Value | Alias | Description |
+|-------|-------|-------------|
+| `json` | — | Structured JSON, newline-delimited |
+| `text` | — | Human-readable key=value |
+| `clf` | — | Apache/Nginx Combined Log Format |
+| `apache_error` | — | Apache error log |
+| `log4j` | — | Log4j / Python logging format |
+| `syslog` | — | BSD syslog (RFC 3164) |
+| `rfc5424` | — | IETF syslog (RFC 5424) |
+| `nginx_error` | — | Nginx error log |
+| `kv` | `logfmt` | Key=value / logfmt |
+| `android_logcat` | — | Android logcat |
+| `windows_cbs` | — | Windows CBS/CSI log |
+| `spark_hdfs` | `spark` | Apache Spark / HDFS |
+| `health_app` | — | Health app pipe-delimited |
+| `proxifier` | — | Proxifier bracket format |
+| `cloudwatch` | — | AWS CloudWatch JSON |
+| `systemd_journal` | — | systemd journal JSON export |
+| `hpc` | `bgl` | HPC / Blue Gene/L |
+| `iis_w3c` | `iis` | IIS W3C Extended log |
+| `ecs` | — | Elastic Common Schema 8.x |
+| `otel` | `opentelemetry`, `otlp` | OpenTelemetry OTLP JSON |
 
 When `formats:` (sequence) is set it overrides `format:` (single string), allowing one
 sink to write multiple formats to the same path prefix.
@@ -281,37 +278,34 @@ agents:
 
 ### Agent Keys
 
-| Key | Type | Default | Tier | Description |
-|-----|------|---------|------|-------------|
-| `name` | string | required | **[Anyone]** | Unique identifier; expanded to `name-1`, `-2` when `instances > 1` |
-| `type` | string | `""` | **[Anyone]** | Free-form label (e.g. `web_server`, `database`) |
-| `rate` | string | — | **[Free]** | Records/s as `"200/s"` or numeric |
-| `rate_per_second` | number | `1.0` | **[Free]** | Numeric fallback when `rate` absent |
-| `log_level` | string | `"info"` | **[Anyone]** | Default severity: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
-| `level_weights` | map | `{}` | **[Anyone]** | Explicit level distribution weights (auto-normalized) |
-| `error_rate` | number | `0.0` | **[Free]** | Global ERROR probability (0.0–1.0) |
-| `message_template` | string | `""` | **[Anyone]** | Message string with `{field_name}` placeholders |
-| `use` | string | `""` | **[Pro]** | Template name to inherit from |
-| `instances` | integer | `1` | **[Pro]** | Number of parallel copies |
-| `start_after` | string/number | `0.0` | **[Free]** | Startup delay (duration format) |
-| `fields` | sequence | `[]` | **[Free]** | Field definitions (see [Fields & Generators](#fields--generators)) |
-| `phases` | sequence | `[]` | **[Free]** | Time-based behavior phases (see [Phases](#phases)) |
-| `latency_ms` | distribution | absent | **[Free]** | Latency distribution (see [Latency](#latency)) |
-| `dependencies` | sequence | `[]` | **[Pro]** | Upstream agent names (used by auto_cascade) |
-| `health_state` | map | absent | **[Pro]** | Health state machine |
-| `state` | map | `{}` | **[Pro]** | Internal state variables |
-| `effects` | sequence | `[]` | **[Pro]** | Conditional behavior from state |
-| `noise` | map | absent | **[Pro]** | Per-agent noise overrides |
-| `rate_modulation` | map | absent | **[Pro]** | Time-varying rate changes |
-| `slow_queries` | map | absent | **[Pro]** | Probabilistic slow operations |
-| `availability` | map | absent | **[Pro]** | Uptime and failure mode |
-| `failures` | map | absent | **[Pro]** | Burst failure patterns |
-| `request_flow` | sequence | `[]` | **[Enterprise]** | Distributed call chain |
-| `contention` | map | absent | **[Enterprise]** | Connection pool limits |
-| `outputs` | sequence | `[]` | **[CLI only]** | Route to specific named outputs (empty = all) |
-
-**Note:** Per-agent `outputs:` routing (`dsl.agent.output_routing`) is disabled on the
-server for all tiers. All agents receive all sinks.
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | required | Unique identifier; expanded to `name-1`, `-2` when `instances > 1` |
+| `type` | string | `""` | Free-form label (e.g. `web_server`, `database`) |
+| `rate` | string | — | Records/s as `"200/s"` or numeric |
+| `rate_per_second` | number | `1.0` | Numeric fallback when `rate` absent |
+| `log_level` | string | `"info"` | Default severity: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
+| `level_weights` | map | `{}` | Explicit level distribution weights (auto-normalized) |
+| `error_rate` | number | `0.0` | Global ERROR probability (0.0–1.0) |
+| `message_template` | string | `""` | Message string with `{field_name}` placeholders |
+| `use` | string | `""` | Template name to inherit from |
+| `instances` | integer | `1` | Number of parallel copies |
+| `start_after` | string/number | `0.0` | Startup delay (duration format) |
+| `fields` | sequence | `[]` | Field definitions (see [Fields & Generators](#fields--generators)) |
+| `phases` | sequence | `[]` | Time-based behavior phases (see [Phases](#phases)) |
+| `latency_ms` | distribution | absent | Latency distribution (see [Latency](#latency)) |
+| `dependencies` | sequence | `[]` | Upstream agent names (used by auto_cascade) |
+| `health_state` | map | absent | Health state machine |
+| `state` | map | `{}` | Internal state variables |
+| `effects` | sequence | `[]` | Conditional behavior from state |
+| `noise` | map | absent | Per-agent noise overrides |
+| `rate_modulation` | map | absent | Time-varying rate changes |
+| `slow_queries` | map | absent | Probabilistic slow operations |
+| `availability` | map | absent | Uptime and failure mode |
+| `failures` | map | absent | Burst failure patterns |
+| `request_flow` | sequence | `[]` | Distributed call chain |
+| `contention` | map | absent | Connection pool limits |
+| `outputs` | sequence | `[]` | Route to specific named outputs (empty = all) |
 
 ---
 
@@ -336,14 +330,11 @@ fields:
 | `generator` | string | Yes | Generator type (see below) |
 | `level_overrides` | map | No | Map of field value → log level override |
 
-All field generators are available from **[Free]** except `normal`, `percentile`, and
-`conditional` which require **[Pro]**.
-
 ---
 
 ### `weighted_choice`
 
-**[Free]** — Pick from a list with specified weights.
+Pick from a list with specified weights.
 
 ```yaml
 - name: method
@@ -361,7 +352,7 @@ All field generators are available from **[Free]** except `normal`, `percentile`
 
 ### `choice`
 
-**[Free]** — Pick uniformly at random from a list.
+Pick uniformly at random from a list.
 
 ```yaml
 - name: path
@@ -377,7 +368,7 @@ All field generators are available from **[Free]** except `normal`, `percentile`
 
 ### `range`
 
-**[Free]** — Random number in a range.
+Random number in a range.
 
 ```yaml
 - name: bytes_sent
@@ -397,7 +388,7 @@ All field generators are available from **[Free]** except `normal`, `percentile`
 
 ### `sequence`
 
-**[Free]** — Auto-incrementing counter with optional prefix.
+Auto-incrementing counter with optional prefix.
 
 ```yaml
 - name: request_id
@@ -417,7 +408,7 @@ Generates: `"req-1000"`, `"req-1001"`, …
 
 ### `static`
 
-**[Free]** — Always the same fixed value.
+Always the same fixed value.
 
 ```yaml
 - name: host
@@ -433,7 +424,7 @@ Generates: `"req-1000"`, `"req-1001"`, …
 
 ### `timestamp`
 
-**[Free]** — Formatted date/time from simulation clock.
+Formatted date/time from simulation clock.
 
 ```yaml
 - name: access_time
@@ -452,7 +443,7 @@ follows `time.timezone`; in deterministic mode it uses the configured offset.
 
 ### `normal`
 
-**[Pro]** — Gaussian (bell-curve) distribution.
+Gaussian (bell-curve) distribution.
 
 ```yaml
 - name: response_time
@@ -472,7 +463,7 @@ Negative values are clamped to `0.0`.
 
 ### `percentile`
 
-**[Pro]** — Piecewise distribution defined by percentile targets.
+Piecewise distribution defined by percentile targets.
 
 ```yaml
 - name: latency_ms
@@ -495,7 +486,7 @@ linear [p99, p99 × 1.5].
 
 ### `conditional`
 
-**[Pro]** — Different generator per value of a prior field.
+Different generator per value of a prior field.
 
 ```yaml
 - name: status_code
@@ -582,16 +573,12 @@ agents:
 Phases run sequentially in order. When all phases complete, the agent continues at its
 base configuration (or the scenario ends if `duration` has elapsed).
 
-**Tier:** `dsl.agent.phases` — **[Free]**
-
 ---
 
 ## Latency
 
 Latency can be set at agent level (`agents[].latency_ms`) or phase level
 (`phases[].latency_ms`). Three forms are supported.
-
-**Tier:** `dsl.agent.latency` — **[Free]**
 
 ### Uniform (array)
 
@@ -646,8 +633,6 @@ latency_ms:
 Named presets that agents inherit via `use: template_name`. Agent values override
 template defaults. Templates can include any agent-level key.
 
-**Tier:** `dsl.scenario.templates` and `dsl.agent.use_template` — **[Pro]**
-
 ```yaml
 templates:
   go_microservice:
@@ -684,8 +669,6 @@ Declare the communication topology between agents. Used by auto-cascade and rule
 determine propagation paths. `type:` is metadata only — it does not affect engine
 behavior.
 
-**Tier:** `dsl.scenario.interactions` — **[Pro]**
-
 ```yaml
 interactions:
   - from: api-gateway
@@ -712,8 +695,6 @@ interactions:
 Propagation rules cascade effects from one agent to another when a condition is met.
 Condition expressions are evaluated by the engine; the loader passes them as strings.
 
-**Tier:** `dsl.scenario.rules` — **[Enterprise]**
-
 ```yaml
 rules:
   - when: "postgres-primary.error_rate > 0.05"
@@ -738,8 +719,6 @@ rules:
 ## Incidents
 
 Time- or probability-triggered events that modify agent behavior for a duration.
-
-**Tier:** `dsl.scenario.incidents` — **[Pro]**
 
 ```yaml
 incidents:
@@ -789,8 +768,6 @@ Probabilistic four-state machine: **Healthy (0)** → **Degraded (1)** → **Fai
 → **Recovering (3)** → **Healthy (0)**. Each state has its own latency multiplier and
 error rate.
 
-**Tier:** `dsl.agent.health_state` — **[Pro]**
-
 ```yaml
 agents:
   - name: order-service
@@ -838,8 +815,6 @@ State variables track internal agent metrics (queue depth, connection count, etc
 Effects change behavior when a variable crosses a threshold. Condition expressions are
 engine-evaluated strings.
 
-**Tier:** `dsl.agent.state_variables` and `dsl.agent.effects` — **[Pro]**
-
 ```yaml
 agents:
   - name: order-service
@@ -885,8 +860,6 @@ State variables are declared as a map, where each key is the variable name:
 ## Rate Modulation
 
 Makes an agent's traffic vary over time. Two patterns are supported.
-
-**Tier:** `dsl.agent.rate_modulation` — **[Pro]**
 
 ### Sinusoidal
 
@@ -939,8 +912,6 @@ Local hour calculation uses `time.timezone` and `time.offset_minutes`.
 Automatically propagates error and latency effects from failing agents to their
 dependents (declared via `interactions:` and `dependencies:`), without explicit rules.
 
-**Tier:** `dsl.scenario.auto_cascade` — **[Enterprise]**
-
 ```yaml
 auto_cascade:
   error_threshold: 0.10          # Cascade when error rate > 10%
@@ -963,8 +934,6 @@ auto_cascade:
 Simulates imperfections in your logging pipeline. Can be configured globally (applies
 to all agents) or per-agent (overrides the global setting for that agent).
 
-**Tier:** Global `dsl.scenario.noise` — **[Pro]**; per-agent `dsl.agent.noise` — **[Pro]**
-
 ```yaml
 noise:
   log_duplication_rate: 0.005    # 0.5% of logs are duplicated
@@ -983,8 +952,6 @@ noise:
 ## Users & Personas
 
 Simulate session-based user traffic with behavioral profiles.
-
-**Tier:** `dsl.scenario.users` and `dsl.scenario.personas` — **[Pro]**
 
 ### Users
 
@@ -1032,8 +999,6 @@ personas:
 A fixed list of entity strings reused across agents to create realistic cross-agent
 correlations (e.g. the same order ID appearing in gateway, service, and database logs).
 
-**Tier:** `dsl.scenario.entity_pool` — **[Pro]**
-
 ```yaml
 entity_pool:
   - "order-10001"
@@ -1047,8 +1012,6 @@ entity_pool:
 ## Field Variations
 
 Add random jitter to numeric fields globally or under `log_format.field_variation`.
-
-**Tier:** `dsl.scenario.field_variations` — **[Pro]**
 
 ```yaml
 field_variations:
@@ -1069,8 +1032,6 @@ field_variations:
 
 Define the output field ordering and selection. Also supports per-format field
 variation under `field_variation`.
-
-**Tier:** `dsl.scenario.log_format` — **[Free]**
 
 ```yaml
 log_format:
@@ -1099,7 +1060,7 @@ System archetypes model production-grade service behavior patterns.
 
 ### Request Flow
 
-**[Enterprise]** — Simulates distributed call chains with network latency and timeouts.
+Simulates distributed call chains with network latency and timeouts.
 
 ```yaml
 agents:
@@ -1124,7 +1085,7 @@ agents:
 
 ### Contention
 
-**[Enterprise]** — Models connection pool exhaustion and request queuing.
+Models connection pool exhaustion and request queuing.
 
 ```yaml
 contention:
@@ -1141,7 +1102,7 @@ contention:
 
 ### Slow Queries
 
-**[Pro]** — Injects probabilistic slow operations.
+Injects probabilistic slow operations.
 
 ```yaml
 slow_queries:
@@ -1158,7 +1119,7 @@ slow_queries:
 
 ### Availability
 
-**[Pro]** — Controls overall uptime and how failures manifest.
+Controls overall uptime and how failures manifest.
 
 ```yaml
 availability:
@@ -1175,7 +1136,7 @@ availability:
 
 ### Failures
 
-**[Pro]** — Burst failure patterns triggered by threshold conditions.
+Burst failure patterns triggered by threshold conditions.
 
 ```yaml
 failures:
@@ -1201,8 +1162,6 @@ failures:
 
 Maintain a library of reusable agent definitions in external YAML files. Agents are
 referenced by name (and optionally version) with optional overrides.
-
-**Tier:** `dsl.scenario.registry` — **[Enterprise]**
 
 ```yaml
 registry:
@@ -1241,8 +1200,8 @@ Agent YAML files must contain an `agent:` top-level key.
 
 ## Includes
 
-**[CLI only]** — Merge other scenario YAML files before parsing. Useful for splitting
-large scenarios across multiple files.
+Merge other scenario YAML files before parsing. Useful for splitting large scenarios
+across multiple files.
 
 ```yaml
 includes:
@@ -1258,7 +1217,7 @@ processed recursively.
 
 ## Replay
 
-**[CLI only]** — Replay a previously recorded log stream at configurable speed.
+Replay a previously recorded log stream at configurable speed.
 
 ```yaml
 replay:
@@ -1271,8 +1230,7 @@ replay:
 | `file` | string | required | Path to recording file |
 | `speed` | number | `1.0` | Playback speed multiplier (>1 = faster) |
 
-Replay requires a `recording` output to have been used during the original run. Replay
-is not a third engine mode — it is configured separately.
+Replay requires a `recording` output to have been used during the original run.
 
 ---
 
@@ -1327,8 +1285,6 @@ formatting).
 
 Optional metadata embedded in every log record. All three keys are free-form strings.
 
-**Tier:** `dsl.scenario.environment` — **[Free]**
-
 ```yaml
 environment:
   region: us-east-1
@@ -1337,62 +1293,3 @@ environment:
 ```
 
 Only `region`, `cluster`, and `version` are parsed. All appear in every output record.
-
----
-
-## Tier Matrix
-
-Summary of all DSL capabilities by minimum required tier.
-
-### Anyone (no login required)
-
-| Capability | Key |
-|-----------|-----|
-| Validate / list scenarios, load scenario | commands |
-| Agent basic (`name`, `type`, `log_level`, `level_weights`, `message_template`) | `dsl.agent.basic` |
-| Scenario `name` | `dsl.scenario.name` |
-
-### Free (logged-in free users)
-
-| Capability | Key |
-|-----------|-----|
-| Create / start / stop / destroy engine; WebSocket | commands |
-| Play / pause / speed / advance (deterministic) | commands |
-| Scenario `duration`, `seed`, `environment`, `log_format` | dsl.scenario.* |
-| Agent `fields`, `phases`, `latency_ms`, `start_after` | dsl.agent.* |
-| HTTP output | `dsl.output.http` |
-| Field generators: `weighted_choice`, `choice`, `range`, `sequence`, `static`, `timestamp` | dsl.field.* |
-| Formats: `json`, `text`, `clf`, `apache_error`, `log4j`, `syslog`, `rfc5424`, `nginx_error`, `kv`/`logfmt` | dsl.format.* |
-
-### Pro
-
-| Capability | Key |
-|-----------|-----|
-| Add / remove agents; set rate / error_rate; generate burst | commands |
-| Scenario `noise`, `users`, `personas`, `entity_pool`, `field_variations`, `templates`, `interactions`, `incidents` | dsl.scenario.* |
-| Agent `state_variables`, `effects`, `failures`, `dependencies`, `slow_queries`, `availability`, `noise`, `health_state`, `rate_modulation`, `instances`, `use` | dsl.agent.* |
-| Field generators: `normal`, `percentile`, `conditional` | dsl.field.* |
-| Formats: `android_logcat`, `windows_cbs`, `spark_hdfs`, `health_app`, `proxifier`, `cloudwatch`, `systemd_journal`, `hpc`/`bgl`, `iis_w3c`/`iis` | dsl.format.* |
-
-### Enterprise
-
-| Capability | Key |
-|-----------|-----|
-| Evaluate cascade | command |
-| Scenario `registry`, `rules`, `auto_cascade` | dsl.scenario.* |
-| Agent `request_flow`, `contention` | dsl.agent.* |
-| Output sinks: `prometheus`, `statsd`, `insight_shm` | dsl.output.* |
-| Formats: `ecs`, `otel`/`opentelemetry`/`otlp` | dsl.format.* |
-
-### Disabled in server (CLI only)
-
-| Feature | Key |
-|---------|-----|
-| Output type `console` | `dsl.output.console` |
-| Output type `file` | `dsl.output.file` |
-| Output type `recording` | `dsl.output.recording` |
-| Scenario `includes` | `dsl.scenario.includes` |
-| Scenario `replay` | `dsl.scenario.replay` |
-| Per-agent output routing (`outputs:` on an agent) | `dsl.agent.output_routing` |
-
-These are structurally valid YAML but the server returns HTTP 403 when they are used.
